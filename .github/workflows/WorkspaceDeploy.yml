@@ -1,0 +1,128 @@
+
+name: Fabric Workspace Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: >
+          Commit SHA to deploy (leave blank to use the latest commit on main).
+          The fabric/ directory at this commit will be pushed to both workspaces.
+        required: false
+        default: ''
+      environment:
+        description: 'Target environment(s) to deploy'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - test-only
+          - prod-only
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Shared setup – resolve the commit SHA once so both jobs use the same ref
+  # ─────────────────────────────────────────────────────────────────────────
+  resolve-commit:
+    name: Resolve target commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || 'main' }}
+          fetch-depth: 0
+
+      - name: Resolve SHA
+        id: resolve
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying commit: $SHA"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Deploy to TEST
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy-test:
+    name: Deploy → PowerBI-TEST
+    runs-on: ubuntu-latest
+    needs: resolve-commit
+    # Skip this job when the user selected prod-only
+    if: ${{ inputs.environment != 'prod-only' }}
+    environment: Fabric-Test
+    env:
+      PYTHON_VERSION: '3.12'
+
+    steps:
+      - name: Checkout repository at target commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-commit.outputs.sha }}
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: .github/scripts/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r .github/scripts/requirements.txt
+
+      - name: Deploy fabric/ contents to TEST workspace
+        env:
+          TENANT_ID:           ${{ secrets.POWERBI_TENANT_ID }}
+          CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
+          CLIENT_SECRET:       ${{ secrets.POWERBI_CLIENT_SECRET }}
+          TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_TEST_WORKSPACE_ID }}
+        run: |
+          echo "Deploying commit ${{ needs.resolve-commit.outputs.sha }} → PowerBI-TEST"
+          python .github/scripts/deploy_to_workspace.py
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Deploy to PROD  (requires TEST to succeed; gated by environment approval)
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → PowerBI-PROD
+    runs-on: ubuntu-latest
+    needs: [resolve-commit, deploy-test]
+    # Run when:  both (default), or prod-only (skips test job so needs it as optional)
+    # The 'always()' guard lets prod-only bypass the skipped test job.
+    if: |
+      always() &&
+      (inputs.environment == 'prod-only' || needs.deploy-test.result == 'success') &&
+      needs.resolve-commit.result == 'success'
+    environment: Fabric-Production
+    env:
+      PYTHON_VERSION: '3.12'
+
+    steps:
+      - name: Checkout repository at target commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-commit.outputs.sha }}
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: .github/scripts/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r .github/scripts/requirements.txt
+
+      - name: Deploy fabric/ contents to PROD workspace
+        env:
+          TENANT_ID:           ${{ secrets.POWERBI_TENANT_ID }}
+          CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
+          CLIENT_SECRET:       ${{ secrets.POWERBI_CLIENT_SECRET }}
+          TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_PROD_WORKSPACE_ID }}
+        run: |
+          echo "Deploying commit ${{ needs.resolve-commit.outputs.sha }} → PowerBI-PROD"
+          python .github/scripts/deploy_to_workspace.py
