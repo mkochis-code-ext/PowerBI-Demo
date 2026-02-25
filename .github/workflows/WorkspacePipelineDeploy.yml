@@ -1,0 +1,332 @@
+
+name: PowerBI Deployment Pipeline
+
+on:
+    workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FABRIC_PIPELINE_NAME: 'PowerBI Deployment'   # exact display name in Fabric
+  DEV_WORKSPACE_ID: ''   # Dev workspace ID (GUID) - leave empty to look up by name
+  DEV_WORKSPACE_NAME: 'PowerBI-DEV'   # Dev workspace name (used if ID is empty)
+  DEV_STAGE_NAME: 'Development'
+  TEST_STAGE_NAME: 'Test'
+  PROD_STAGE_NAME: 'Production'
+  FABRIC_RESOURCE: 'https://api.fabric.microsoft.com'
+  # Optional: set DEBUG to 1 in GitHub Actions env/vars to enable verbose logs
+  DEBUG: '1'
+  AZURE_CREDENTIALS: >-
+    {"clientId":"${{ secrets.PowerBI_CLIENT_ID }}","clientSecret":"${{ secrets.PowerBI_CLIENT_SECRET }}","tenantId":"${{ secrets.PowerBI_TENANT_ID }}","subscriptionId":"${{ secrets.PowerBI_SUBSCRIPTION_ID }}"}
+
+jobs:
+  test:
+    name: Promote to Test
+    runs-on: ubuntu-latest
+    environment: Fabric-Test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (service principal)
+        uses: azure/login@v2
+        with:
+          creds: ${{ env.AZURE_CREDENTIALS }}
+
+      - name: "Fabric deploy: Development → Test (PowerShell)"
+        shell: pwsh
+        run: |
+          # ============================================================================
+          # Script: Deploy from Development to Test
+          # Purpose: Promotes Fabric artifacts from Dev stage to Test stage using
+          #          Fabric Deployment Pipeline API with status polling
+          # ============================================================================
+          
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          # Helper functions for logging and error handling
+          function Log([string]$m){ Write-Host "[$(Get-Date -Format o)] $m" }
+          function Fail([string]$m){ Write-Error $m; exit 1 }
+
+          # Acquire access token for Fabric API
+          $fabricResource = "${{ env.FABRIC_RESOURCE }}"
+          $token = az account get-access-token --resource $fabricResource --query accessToken -o tsv 2>&1
+          if ([string]::IsNullOrWhiteSpace($token)){ Fail "Failed to acquire Fabric token." }
+
+          function Invoke-AzRestJson([string]$Method,[string]$Uri,[string]$BodyJson){
+            $headers = @("Authorization=Bearer $token","Content-Type=application/json")
+            $cliArgs = @('rest', '--method', $Method, '--uri', $Uri, '--headers') + $headers
+            if ($BodyJson){ $tmp = New-TemporaryFile; $BodyJson | Out-File -Encoding utf8 -FilePath $tmp; $cliArgs += @('--body', "@$tmp") }
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "az"
+            $psi.RedirectStandardError = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.UseShellExecute = $false
+            foreach ($arg in $cliArgs) { $psi.ArgumentList.Add($arg) }
+
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $out = $p.StandardOutput.ReadToEnd()
+            $err = $p.StandardError.ReadToEnd()
+            $p.WaitForExit()
+
+            $status = ($err -split "`n" | Select-String -Pattern 'Status Code:\s*(\d+)' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Last 1)
+            [pscustomobject]@{ Status=$status; ExitCode=$p.ExitCode; OutJson=$out; ErrText=$err }
+          }
+
+          # ============================================================================
+          # STEP 1: Discover Pipeline and Stage Configuration
+          # Re-discovers pipeline and stage IDs (not passed between jobs)
+          # ============================================================================
+          Log "Discovering Fabric pipeline and stage IDs..."
+          $r = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines"
+          if ($r.ExitCode -ne 0){ $r.ErrText | Out-Host; Fail "Failed listing pipelines" }
+          $pipelines = ($r.OutJson | ConvertFrom-Json).value
+
+          $pipelineName = "${{ env.FABRIC_PIPELINE_NAME }}"
+          $pipeline = $pipelines | Where-Object { $_.displayName -eq $pipelineName } | Select-Object -First 1
+          if (-not $pipeline){ Fail "Pipeline '$pipelineName' not found" }
+          $pipelineId = $pipeline.id
+
+          $r2 = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines/$pipelineId/stages"
+          if ($r2.ExitCode -ne 0){ $r2.ErrText | Out-Host; Fail "Failed listing stages" }
+          $stages = ($r2.OutJson | ConvertFrom-Json).value
+
+          $devId  = ($stages | Where-Object { $_.displayName -eq "${{ env.DEV_STAGE_NAME }}"  } | Select-Object -ExpandProperty id -First 1)
+          $testId = ($stages | Where-Object { $_.displayName -eq "${{ env.TEST_STAGE_NAME }}" } | Select-Object -ExpandProperty id -First 1)
+
+          if (-not $devId -or -not $testId){ Fail "Could not resolve source/target stage IDs" }
+          Log "Pipeline: $pipelineId, Dev: $devId, Test: $testId"
+
+          # ============================================================================
+          # STEP 2: Trigger Deployment from Development to Test
+          # Initiates async deployment operation via Fabric API
+          # ============================================================================
+          $deployUri = "$fabricResource/v1/deploymentPipelines/$pipelineId/deploy"
+          $body = @{
+            sourceStageId = $devId    # Development stage
+            targetStageId = $testId   # Test stage
+            note = "GH Dev→Test"       # Deployment note for auditing
+          } | ConvertTo-Json -Depth 5
+
+          try {
+            $resp = Invoke-WebRequest -Method Post -Uri $deployUri -Headers @{ Authorization = "Bearer $token"; 'Content-Type'='application/json'} -Body $body -ErrorAction Stop
+            Write-Host "HTTP $($resp.StatusCode)"
+            $operationId = $resp.Headers['x-ms-operation-id']
+            $retryAfterRaw = $resp.Headers['Retry-After']
+            $locationUrlRaw = $resp.Headers['Location']
+            # Handle headers that may be arrays
+            $retryAfter = if ($retryAfterRaw -is [array]) { $retryAfterRaw[0] } else { $retryAfterRaw }
+            $locationUrl = if ($locationUrlRaw -is [array]) { $locationUrlRaw[0] } else { $locationUrlRaw }
+            Write-Host "x-ms-operation-id: $operationId"
+            Write-Host "Retry-After: $retryAfter"
+            Write-Host "Location: $locationUrl"
+
+            # Poll for deployment completion
+            if ($locationUrl) {
+              Log "Polling deployment status..."
+              $maxAttempts = 60
+              $attempt = 0
+              $sleepSeconds = if ($retryAfter) { [int]$retryAfter } else { 10 }
+              
+              while ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds $sleepSeconds
+                $attempt++
+                
+                $statusResp = Invoke-AzRestJson -Method GET -Uri $locationUrl
+                if ($statusResp.ExitCode -eq 0 -and $statusResp.OutJson) {
+                  $status = ($statusResp.OutJson | ConvertFrom-Json)
+                  Log "Deployment status: $($status.status) (attempt $attempt/$maxAttempts)"
+                  
+                  if ($status.status -eq 'Succeeded') {
+                    Log "✓ Deployment completed successfully!"
+                    break
+                  }
+                  elseif ($status.status -eq 'Failed') {
+                    $statusResp.OutJson | Out-Host
+                    Fail "Deployment failed. Check the operation details above."
+                  }
+                }
+                else {
+                  Log "Waiting for deployment to complete..."
+                }
+              }
+              
+              if ($attempt -ge $maxAttempts) {
+                Fail "Deployment polling timed out after $maxAttempts attempts."
+              }
+            }
+          }
+          catch {
+            $errorDetails = $_.ErrorDetails.Message
+            $exMessage = $_.Exception.Message
+            
+            # Check for "NoItemsToDeploy" in either the error details or exception message
+            if (($errorDetails -like '*NoItemsToDeploy*') -or ($exMessage -like '*NoItemsToDeploy*')) {
+                 Write-Host "::warning::Deployment skipped: Source and Target stages are already in sync (no changes to deploy)."
+                 exit 0
+            }
+            
+            # For other errors, print details if available
+            if ($errorDetails) {
+                Write-Error "API Error: $errorDetails"
+            } else {
+                Write-Error "Error: $exMessage"
+            }
+
+            throw $_
+          }
+
+  production:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: test
+    environment: Fabric-Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (service principal)
+        uses: azure/login@v2
+        with:
+          creds: ${{ env.AZURE_CREDENTIALS }}
+
+      - name: "Fabric deploy: Test → Production (PowerShell)"
+        shell: pwsh
+        run: |
+          # ============================================================================
+          # Script: Deploy from Test to Production
+          # Purpose: Promotes Fabric artifacts from Test stage to Production stage using
+          #          Fabric Deployment Pipeline API with status polling
+          # ============================================================================
+          
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          # Helper functions for logging and error handling
+          function Log([string]$m){ Write-Host "[$(Get-Date -Format o)] $m" }
+          function Fail([string]$m){ Write-Error $m; exit 1 }
+
+          # Acquire access token for Fabric API
+          $fabricResource = "${{ env.FABRIC_RESOURCE }}"
+          $token = az account get-access-token --resource $fabricResource --query accessToken -o tsv 2>&1
+          if ([string]::IsNullOrWhiteSpace($token)){ Fail "Failed to acquire Fabric token." }
+
+          # Helper function to invoke Fabric REST API using Azure CLI
+          function Invoke-AzRestJson([string]$Method,[string]$Uri,[string]$BodyJson){
+            $headers = @("Authorization=Bearer $token","Content-Type=application/json")
+            $cliArgs = @('rest', '--method', $Method, '--uri', $Uri, '--headers') + $headers
+            if ($BodyJson){ $tmp = New-TemporaryFile; $BodyJson | Out-File -Encoding utf8 -FilePath $tmp; $cliArgs += @('--body', "@$tmp") }
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "az"
+            $psi.RedirectStandardError = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.UseShellExecute = $false
+            foreach ($arg in $cliArgs) { $psi.ArgumentList.Add($arg) }
+
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $out = $p.StandardOutput.ReadToEnd()
+            $err = $p.StandardError.ReadToEnd()
+            $p.WaitForExit()
+
+            $status = ($err -split "`n" | Select-String -Pattern 'Status Code:\s*(\d+)' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Last 1)
+            [pscustomobject]@{ Status=$status; ExitCode=$p.ExitCode; OutJson=$out; ErrText=$err }
+          }
+
+          # Discover pipeline and stage IDs
+          Log "Discovering Fabric pipeline and stage IDs..."
+          $r = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines"
+          if ($r.ExitCode -ne 0){ $r.ErrText | Out-Host; Fail "Failed listing pipelines" }
+          $pipelines = ($r.OutJson | ConvertFrom-Json).value
+
+          $pipelineName = "${{ env.FABRIC_PIPELINE_NAME }}"
+          $pipeline = $pipelines | Where-Object { $_.displayName -eq $pipelineName } | Select-Object -First 1
+          if (-not $pipeline){ Fail "Pipeline '$pipelineName' not found" }
+          $pipelineId = $pipeline.id
+
+          $r2 = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines/$pipelineId/stages"
+          if ($r2.ExitCode -ne 0){ $r2.ErrText | Out-Host; Fail "Failed listing stages" }
+          $stages = ($r2.OutJson | ConvertFrom-Json).value
+
+          $testId = ($stages | Where-Object { $_.displayName -eq "${{ env.TEST_STAGE_NAME }}" } | Select-Object -ExpandProperty id -First 1)
+          $prodId = ($stages | Where-Object { $_.displayName -eq "${{ env.PROD_STAGE_NAME }}" } | Select-Object -ExpandProperty id -First 1)
+
+          if (-not $testId -or -not $prodId){ Fail "Could not resolve source/target stage IDs" }
+          Log "Pipeline: $pipelineId, Test: $testId, Prod: $prodId"
+
+          # Deploy from Test to Production
+          $deployUri = "$fabricResource/v1/deploymentPipelines/$pipelineId/deploy"
+          $body = @{
+            sourceStageId = $testId
+            targetStageId = $prodId
+            note = "GH Test→Prod"
+          } | ConvertTo-Json -Depth 5
+
+          try {
+            $resp = Invoke-WebRequest -Method Post -Uri $deployUri -Headers @{ Authorization = "Bearer $token"; 'Content-Type'='application/json'} -Body $body -ErrorAction Stop
+            Write-Host "HTTP $($resp.StatusCode)"
+            $operationId = $resp.Headers['x-ms-operation-id']
+            $retryAfterRaw = $resp.Headers['Retry-After']
+            $locationUrlRaw = $resp.Headers['Location']
+            # Handle headers that may be arrays
+            $retryAfter = if ($retryAfterRaw -is [array]) { $retryAfterRaw[0] } else { $retryAfterRaw }
+            $locationUrl = if ($locationUrlRaw -is [array]) { $locationUrlRaw[0] } else { $locationUrlRaw }
+            Write-Host "x-ms-operation-id: $operationId"
+            Write-Host "Retry-After: $retryAfter"
+            Write-Host "Location: $locationUrl"
+
+            # Poll for deployment completion
+            if ($locationUrl) {
+              Log "Polling deployment status..."
+              $maxAttempts = 60
+              $attempt = 0
+              $sleepSeconds = if ($retryAfter) { [int]$retryAfter } else { 10 }
+              
+              while ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds $sleepSeconds
+                $attempt++
+                
+                $statusResp = Invoke-AzRestJson -Method GET -Uri $locationUrl
+                if ($statusResp.ExitCode -eq 0 -and $statusResp.OutJson) {
+                  $status = ($statusResp.OutJson | ConvertFrom-Json)
+                  Log "Deployment status: $($status.status) (attempt $attempt/$maxAttempts)"
+                  
+                  if ($status.status -eq 'Succeeded') {
+                    Log "✓ Deployment completed successfully!"
+                    break
+                  }
+                  elseif ($status.status -eq 'Failed') {
+                    $statusResp.OutJson | Out-Host
+                    Fail "Deployment failed. Check the operation details above."
+                  }
+                }
+                else {
+                  Log "Waiting for deployment to complete..."
+                }
+              }
+              
+              if ($attempt -ge $maxAttempts) {
+                Fail "Deployment polling timed out after $maxAttempts attempts."
+              }
+            }
+          }
+          catch {
+            $errorDetails = $_.ErrorDetails.Message
+            $exMessage = $_.Exception.Message
+            
+            # Check for "NoItemsToDeploy" in either the error details or exception message
+            if (($errorDetails -like '*NoItemsToDeploy*') -or ($exMessage -like '*NoItemsToDeploy*')) {
+                 Write-Host "::warning::Deployment skipped: Source and Target stages are already in sync (no changes to deploy)."
+                 exit 0
+            }
+            
+            # For other errors, print details if available
+            if ($errorDetails) {
+                Write-Error "API Error: $errorDetails"
+            } else {
+                Write-Error "Error: $exMessage"
+            }
+
+            throw $_
+          }
