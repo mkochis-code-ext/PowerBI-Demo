@@ -202,18 +202,26 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> None:
     """
     Decode every part in the definition and write it to disk.
 
-    The API returns the files that make up the item exactly as they would
-    appear in a Fabric Git integration, so all relative paths are preserved.
+    Directory layout mirrors the Fabric GitHub integration exactly:
 
-    Directory layout:
-        fabric/<ItemType>/<ItemName>/<path returned by API>
+        fabric/<ItemDisplayName>.<ItemType>/<path returned by API>
+
+    Examples:
+        fabric/Sales Report.Report/definition.pbir
+        fabric/Sales Model.SemanticModel/model.bim
+        fabric/Bronze.Lakehouse/lakehouse.metadata.json
+        fabric/ETL Pipeline.DataPipeline/pipeline-content.json
+        fabric/Analysis.Notebook/notebook-content.ipynb
+        fabric/MyDB.SQLDatabase/SqlDatabase.json
+        fabric/Shared Env.Environment/environment.yml
     """
     parts = definition.get("parts", [])
     if not parts:
         print("      WARNING: definition contained no parts.")
         return
 
-    item_dir = OUTPUT_ROOT / item_type / sanitize(item_name)
+    # <DisplayName>.<ItemType>  –  matches Fabric Git integration folder naming
+    item_dir = OUTPUT_ROOT / f"{sanitize(item_name)}.{item_type}"
     for part in parts:
         rel_path     = part.get("path", "unknown_file")
         payload_type = part.get("payloadType", "InlineBase64")
