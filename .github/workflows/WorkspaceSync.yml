@@ -1,0 +1,119 @@
+# =============================================================================
+# WorkspaceSync.yml
+#
+# Authenticates to the Power BI REST API as a Service Principal, discovers
+# every artefact in the target workspace (reports, paginated reports,
+# dataflows, datasets, dashboards), downloads / exports each one, and commits
+# the result to the main branch.  New content always overwrites existing files.
+#
+# Required GitHub Secrets
+# -----------------------
+#   POWERBI_TENANT_ID     – Azure AD tenant ID
+#   POWERBI_CLIENT_ID     – Service Principal application (client) ID
+#   POWERBI_CLIENT_SECRET – Service Principal client secret
+#   POWERBI_WORKSPACE_ID  – Power BI workspace (group) ID to sync
+#
+# The GITHUB_TOKEN secret is provided automatically by GitHub Actions and is
+# used for the final git push.  No additional PAT is needed as long as the
+# repository's "Workflow permissions" allow read/write access
+# (Settings → Actions → General → Workflow permissions → Read and write).
+# =============================================================================
+
+name: Power BI Workspace Sync
+
+on:
+  # Run automatically every day at 02:00 UTC
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Allow manual execution from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      workspace_id_override:
+        description: >
+          Optional: override the workspace ID stored in secrets
+          (leave blank to use POWERBI_WORKSPACE_ID secret)
+        required: false
+        default: ''
+
+env:
+  PYTHON_VERSION: '3.12'
+  # All downloaded artefacts land under this directory inside the repository
+  OUTPUT_DIR: powerbi
+
+jobs:
+  sync:
+    name: Sync Power BI Workspace to Repository
+    runs-on: ubuntu-latest
+
+    # Give the GITHUB_TOKEN permission to push commits
+    permissions:
+      contents: write
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout the repository at main so the sync script can write files
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Use the built-in token; the write permission is granted above
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Fetch full history so the subsequent push has the correct base
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # 2. Python runtime
+      # -----------------------------------------------------------------------
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install --upgrade requests
+
+      # -----------------------------------------------------------------------
+      # 3. Run the sync script
+      #    The script writes all artefacts under the 'powerbi/' directory tree.
+      #    New content overwrites existing files; nothing is deleted.
+      # -----------------------------------------------------------------------
+      - name: Sync Power BI workspace
+        env:
+          TENANT_ID:     ${{ secrets.POWERBI_TENANT_ID }}
+          CLIENT_ID:     ${{ secrets.POWERBI_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.POWERBI_CLIENT_SECRET }}
+          # Prefer a manual override (workflow_dispatch input) over the secret
+          WORKSPACE_ID: >-
+            ${{
+              inputs.workspace_id_override != ''
+                && inputs.workspace_id_override
+                || secrets.POWERBI_WORKSPACE_ID
+            }}
+        run: python .github/scripts/sync_powerbi.py
+
+      # -----------------------------------------------------------------------
+      # 4. Commit and push – always overwrites; no conflict resolution needed
+      # -----------------------------------------------------------------------
+      - name: Commit synced artefacts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage everything under the output directory
+          git add "${{ env.OUTPUT_DIR }}/"
+
+          # Only commit when there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes detected – workspace is already up to date."
+          else
+            TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            git commit -m "chore: sync Power BI workspace [${TIMESTAMP}]"
+
+            # Push; --force-with-lease is safer than --force but still
+            # overwrites any diverged state caused by concurrent runs
+            git push --force-with-lease origin main
+            echo "Changes committed and pushed to main."
+          fi
