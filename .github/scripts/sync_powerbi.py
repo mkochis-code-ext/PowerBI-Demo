@@ -1,31 +1,44 @@
 """
-sync_powerbi.py
+sync_powerbi.py  –  Fabric Workspace Source Backup
 
-Authenticates to the Power BI REST API as a Service Principal, discovers all
-content in the target workspace, and downloads the source files for every
-artefact it finds.  Files are written under the 'powerbi/' directory tree.
+Uses the Microsoft Fabric REST API to discover every item in the target
+workspace and download its source definition files.  Content is decoded from
+base64 and saved under 'fabric/' preserving the exact path structure returned
+by the API.
 
-  Resource type          Source file saved
-  ─────────────────────  ──────────────────────────────────────────────────
-  Power BI Report        <name>.pbix   – full report + embedded dataset
-  Paginated Report       <name>.rdl    – Report Definition Language source
-  Dataflow               <name>.json   – Power Query / mashup model
-  Dataset                <name>.json   – full schema, tables, measures,
-                                         data sources (REST API model def)
-  Dashboard              <name>.json   – dashboard definition + tile layout
+  Item type              Source files saved
+  ─────────────────────  ────────────────────────────────────────────────
+  Notebook               <name>.ipynb  +  .platform
+  SemanticModel          model.bim  (or  *.tmdl  tree)  +  .platform
+  Report                 definition.pbir  +  report.json  +  …  +  .platform
+  Lakehouse              lakehouse.metadata.json  +  .platform
+  DataPipeline           pipeline-content.json  +  .platform
+  SparkJobDefinition     SparkJobDefinitionV1.json  +  .platform
+  Warehouse              …  +  .platform
+  KQLDatabase            DatabaseProperties.json  +  .platform
+  KQLQueryset            queryset.kql  +  .platform
+  MLModel                MLModel.json  +  .platform
+  MLExperiment           MLExperiment.json  +  .platform
+  Eventstream            eventstream.json  +  .platform
+  SQLDatabase            SqlDatabase.json  +  .platform
+  … any other type that exposes a getDefinition endpoint …
+
+Items that do not expose getDefinition (e.g. SQLAnalyticsEndpoint, Dashboard)
+are skipped gracefully and recorded in workspace_manifest.json.
 
 Expected environment variables
 -------------------------------
 TENANT_ID      – Azure AD tenant ID
 CLIENT_ID      – Service Principal application (client) ID
 CLIENT_SECRET  – Service Principal client secret
-WORKSPACE_ID   – Power BI workspace (group) ID to sync
+WORKSPACE_ID   – Fabric workspace ID to sync
 """
 
 import os
 import sys
 import json
 import time
+import base64
 import pathlib
 import re
 import requests
@@ -38,29 +51,44 @@ CLIENT_ID     = os.environ["CLIENT_ID"]
 CLIENT_SECRET = os.environ["CLIENT_SECRET"]
 WORKSPACE_ID  = os.environ["WORKSPACE_ID"]
 
-API_BASE      = "https://api.powerbi.com/v1.0/myorg"
+FABRIC_BASE   = "https://api.fabric.microsoft.com/v1"
 AUTH_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-SCOPE         = "https://analysis.windows.net/powerbi/api/.default"
 
-OUTPUT_ROOT   = pathlib.Path("powerbi")
+# Fabric scope covers all Fabric items including Semantic Models / Power BI
+FABRIC_SCOPE  = "https://api.fabric.microsoft.com/.default"
+
+OUTPUT_ROOT   = pathlib.Path("fabric")
+
+# Item types that are auto-generated / service-only and have no downloadable
+# source definition.
+NO_DEFINITION_TYPES = {
+    "SQLAnalyticsEndpoint",   # auto-generated from Lakehouse
+    "Dashboard",              # service-only construct, no source file
+    "MountedWarehouse",
+    "MountedDataFactory",
+}
+
+# Long-running operation poll settings
+POLL_INTERVAL = 5    # seconds between polls
+POLL_MAX      = 72   # 72 x 5 s = 6 min max per item
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def sanitize(name: str) -> str:
-    """Replace characters that are problematic in file names."""
+    """Strip characters that are unsafe in directory / file names."""
     return re.sub(r'[\\/:*?"<>|]', "_", name).strip()
 
 
-def get_access_token() -> str:
+def get_access_token(scope: str) -> str:
     resp = requests.post(
         AUTH_URL,
         data={
             "grant_type":    "client_credentials",
             "client_id":     CLIENT_ID,
             "client_secret": CLIENT_SECRET,
-            "scope":         SCOPE,
+            "scope":         scope,
         },
         timeout=30,
     )
@@ -70,187 +98,158 @@ def get_access_token() -> str:
         print("ERROR: No access_token in authentication response.", file=sys.stderr)
         print(resp.text, file=sys.stderr)
         sys.exit(1)
-    print("  Authentication successful.")
     return token
 
 
-def api_get(session: requests.Session, url: str, stream: bool = False):
-    resp = session.get(url, timeout=120, stream=stream)
-    if resp.status_code == 404:
-        return None
-    resp.raise_for_status()
-    return resp
-
-
-def write_binary(path: pathlib.Path, data: bytes) -> None:
+def write_file(path: pathlib.Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
-    print(f"    Saved  {path}")
-
-
-def write_json(path: pathlib.Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"    Saved  {path}")
+    print(f"      Saved {path}")
 
 
 # ---------------------------------------------------------------------------
-# Resource discovery
+# Fabric API – item discovery
 # ---------------------------------------------------------------------------
 
-def list_resource(session: requests.Session, resource: str) -> list:
-    url  = f"{API_BASE}/groups/{WORKSPACE_ID}/{resource}"
-    resp = api_get(session, url)
-    if resp is None:
-        print(f"  WARNING: Could not list {resource} (404).")
-        return []
-    return resp.json().get("value", [])
-
-
-# ---------------------------------------------------------------------------
-# Export helpers
-# ---------------------------------------------------------------------------
-
-def export_report_source(session: requests.Session, report: dict) -> None:
+def list_workspace_items(session: requests.Session) -> list:
     """
-    Download the source file for a report via the /Export endpoint.
-
-    Power BI reports  → .pbix  (binary Power BI Desktop file)
-    Paginated reports → .rdl   (Report Definition Language XML source)
-
-    Both report types are served by the same REST endpoint; Power BI returns
-    the correct format automatically based on the report type.
+    Return all items in the workspace.
+    Handles OData-style pagination via continuationUri.
     """
-    report_id   = report["id"]
-    report_name = sanitize(report.get("name", report_id))
-    report_type = report.get("reportType", "PowerBIReport")
+    items = []
+    url   = f"{FABRIC_BASE}/workspaces/{WORKSPACE_ID}/items"
+    while url:
+        resp = session.get(url, timeout=60)
+        resp.raise_for_status()
+        body  = resp.json()
+        items.extend(body.get("value", []))
+        url   = body.get("continuationUri")
+    return items
 
-    if report_type == "PaginatedReport":
-        _export_paginated_report_rdl(session, report_id, report_name)
-    else:
-        _export_powerbi_report(session, report_id, report_name)
+
+# ---------------------------------------------------------------------------
+# Fabric API – getDefinition
+# ---------------------------------------------------------------------------
+
+def get_item_definition(session: requests.Session, item_id: str) -> dict | None:
+    """
+    POST  /workspaces/{workspaceId}/items/{itemId}/getDefinition
+
+    Returns the 'definition' dict (containing a 'parts' list) or None when
+    the item type does not support the endpoint.
+
+    The API can respond:
+      200  – definition returned synchronously
+      202  – long-running operation; poll until complete
+      400  – item type does not support getDefinition
+      404  – item not found
+    """
+    url  = f"{FABRIC_BASE}/workspaces/{WORKSPACE_ID}/items/{item_id}/getDefinition"
+    resp = session.post(url, timeout=60)
+
+    if resp.status_code in (400, 404):
+        return None
+
+    if resp.status_code == 200:
+        return resp.json().get("definition")
+
+    if resp.status_code == 202:
+        operation_id = resp.headers.get("x-ms-operation-id", "")
+        if not operation_id:
+            location     = resp.headers.get("Location", "")
+            operation_id = location.rstrip("/").split("/")[-1]
+        if not operation_id:
+            print("      WARNING: 202 received but could not find operation ID.")
+            return None
+        return _poll_lro(session, operation_id)
+
+    resp.raise_for_status()
+    return None
 
 
-def _export_powerbi_report(session, report_id, report_name):
-    url  = f"{API_BASE}/groups/{WORKSPACE_ID}/reports/{report_id}/Export"
-    resp = api_get(session, url)
-    if resp is None:
-        print(f"    SKIP   reports/{report_name}.pbix  (not exportable / not found)")
+def _poll_lro(session: requests.Session, operation_id: str) -> dict | None:
+    """Poll a Fabric long-running operation until it succeeds or fails."""
+    status_url = f"{FABRIC_BASE}/operations/{operation_id}"
+    result_url = f"{FABRIC_BASE}/operations/{operation_id}/result"
+
+    for attempt in range(1, POLL_MAX + 1):
+        time.sleep(POLL_INTERVAL)
+        resp = session.get(status_url, timeout=30)
+        resp.raise_for_status()
+        body   = resp.json()
+        status = body.get("status", "").lower()
+        print(f"      Polling {operation_id}: {status} (attempt {attempt}/{POLL_MAX})")
+
+        if status == "succeeded":
+            result = session.get(result_url, timeout=60)
+            result.raise_for_status()
+            return result.json().get("definition")
+
+        if status in ("failed", "cancelled"):
+            err = body.get("error", {})
+            print(f"      Operation {status}: {err.get('message', 'unknown error')}")
+            return None
+
+    print(f"      WARNING: operation {operation_id} timed out after polling.")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Save definition parts
+# ---------------------------------------------------------------------------
+
+def save_definition(item_name: str, item_type: str, definition: dict) -> None:
+    """
+    Decode every part in the definition and write it to disk.
+
+    The API returns the files that make up the item exactly as they would
+    appear in a Fabric Git integration, so all relative paths are preserved.
+
+    Directory layout:
+        fabric/<ItemType>/<ItemName>/<path returned by API>
+    """
+    parts = definition.get("parts", [])
+    if not parts:
+        print("      WARNING: definition contained no parts.")
         return
-    path = OUTPUT_ROOT / "reports" / f"{report_name}.pbix"
-    write_binary(path, resp.content)
 
+    item_dir = OUTPUT_ROOT / item_type / sanitize(item_name)
+    for part in parts:
+        rel_path     = part.get("path", "unknown_file")
+        payload_type = part.get("payloadType", "InlineBase64")
+        payload      = part.get("payload", "")
 
-def _export_paginated_report_rdl(session, report_id, report_name):
-    """
-    Download the .rdl source file for a Paginated Report.
+        if payload_type == "InlineBase64":
+            raw = base64.b64decode(payload)
+        else:
+            raw = payload.encode("utf-8") if isinstance(payload, str) else payload
 
-    The GET /groups/{groupId}/reports/{reportId}/Export endpoint returns the
-    raw Report Definition Language (RDL) XML when called against a paginated
-    report, giving a complete, restorable source backup.
-    """
-    url  = f"{API_BASE}/groups/{WORKSPACE_ID}/reports/{report_id}/Export"
-    resp = api_get(session, url)
-    if resp is None:
-        print(f"    SKIP   paginated-reports/{report_name}.rdl  (not exportable / not found)")
-        return
-    path = OUTPUT_ROOT / "paginated-reports" / f"{report_name}.rdl"
-    write_binary(path, resp.content)
-
-
-def export_dataflow(session: requests.Session, dataflow: dict) -> None:
-    dataflow_id   = dataflow["objectId"]
-    dataflow_name = sanitize(dataflow.get("name", dataflow_id))
-    url           = f"{API_BASE}/groups/{WORKSPACE_ID}/dataflows/{dataflow_id}"
-    resp          = api_get(session, url)
-    if resp is None:
-        print(f"    SKIP   dataflows/{dataflow_name}.json  (not found)")
-        return
-    path = OUTPUT_ROOT / "dataflows" / f"{dataflow_name}.json"
-    write_json(path, resp.json())
-
-
-def export_dataset_metadata(session: requests.Session, dataset: dict) -> None:
-    """
-    Save the full dataset model definition available through the REST API.
-
-    This captures every structural detail the API exposes: the dataset object
-    itself, all tables with their columns and measures, data source connection
-    info, and recent refresh history.  The resulting JSON is sufficient to
-    reconstruct the schema and can be used as a change-tracking artefact.
-
-    Note: downloading the dataset as a raw .pbix binary requires the workspace
-    to be on Premium/PPU with the XMLA read endpoint enabled.  For REST-API-
-    only access (as used here) the JSON model definition is the authoritative
-    source backup.
-    """
-    dataset_id   = dataset["id"]
-    dataset_name = sanitize(dataset.get("name", dataset_id))
-    base_url     = f"{API_BASE}/groups/{WORKSPACE_ID}/datasets/{dataset_id}"
-
-    metadata = {"dataset": dataset}
-
-    # Tables / columns / measures
-    tables_resp = api_get(session, f"{base_url}/tables")
-    if tables_resp:
-        metadata["tables"] = tables_resp.json().get("value", [])
-
-    # Data sources
-    sources_resp = api_get(session, f"{base_url}/datasources")
-    if sources_resp:
-        metadata["datasources"] = sources_resp.json().get("value", [])
-
-    # Refresh history (last 10 entries)
-    refresh_resp = api_get(session, f"{base_url}/refreshes?$top=10")
-    if refresh_resp:
-        metadata["refreshHistory"] = refresh_resp.json().get("value", [])
-
-    path = OUTPUT_ROOT / "datasets" / f"{dataset_name}.json"
-    write_json(path, metadata)
-
-
-def export_dashboard_metadata(session: requests.Session, dashboard: dict) -> None:
-    dashboard_id   = dashboard["id"]
-    dashboard_name = sanitize(dashboard.get("displayName", dashboard_id))
-    base_url       = f"{API_BASE}/groups/{WORKSPACE_ID}/dashboards/{dashboard_id}"
-
-    metadata = {"dashboard": dashboard}
-
-    # Tiles
-    tiles_resp = api_get(session, f"{base_url}/tiles")
-    if tiles_resp:
-        metadata["tiles"] = tiles_resp.json().get("value", [])
-
-    path = OUTPUT_ROOT / "dashboards" / f"{dashboard_name}.json"
-    write_json(path, metadata)
+        write_file(item_dir / rel_path, raw)
 
 
 # ---------------------------------------------------------------------------
 # Workspace manifest
 # ---------------------------------------------------------------------------
 
-def write_workspace_manifest(
-    reports: list,
-    dataflows: list,
-    datasets: list,
-    dashboards: list,
-) -> None:
+def write_manifest(items: list, skipped: list) -> None:
+    type_counts: dict[str, int] = {}
+    for item in items:
+        t = item.get("type", "Unknown")
+        type_counts[t] = type_counts.get(t, 0) + 1
+
     manifest = {
-        "workspaceId": WORKSPACE_ID,
-        "syncedAt":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "counts": {
-            "reports":    len(reports),
-            "dataflows":  len(dataflows),
-            "datasets":   len(datasets),
-            "dashboards": len(dashboards),
-        },
-        "reports":    reports,
-        "dataflows":  dataflows,
-        "datasets":   datasets,
-        "dashboards": dashboards,
+        "workspaceId":  WORKSPACE_ID,
+        "syncedAt":     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "totalItems":   len(items),
+        "skippedCount": len(skipped),
+        "byType":       {t: type_counts[t] for t in sorted(type_counts)},
+        "items":        items,
+        "skippedItems": skipped,
     }
-    path = OUTPUT_ROOT / "workspace_manifest.json"
-    write_json(path, manifest)
+    out = OUTPUT_ROOT / "workspace_manifest.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\n  Manifest  →  {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -258,66 +257,65 @@ def write_workspace_manifest(
 # ---------------------------------------------------------------------------
 
 def main():
-    print("=== Power BI Workspace Sync ===")
-    print(f"Workspace: {WORKSPACE_ID}")
+    print("=== Fabric Workspace Source Backup ===")
+    print(f"Workspace : {WORKSPACE_ID}")
+    print(f"Output    : {OUTPUT_ROOT.resolve()}")
 
-    # Authenticate
-    print("\n[1/6] Authenticating as Service Principal …")
-    token   = get_access_token()
+    # ── 1. Authenticate ─────────────────────────────────────────────────────────────────────
+    print("\n[1/3] Authenticating as Service Principal …")
+    token   = get_access_token(FABRIC_SCOPE)
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {token}"})
+    session.headers.update({
+        "Authorization": f"Bearer {token}",
+        "Content-Type":  "application/json",
+    })
+    print("  OK")
 
-    # Discover
-    print("\n[2/6] Discovering workspace contents …")
-    reports    = list_resource(session, "reports")
-    dataflows  = list_resource(session, "dataflows")
-    datasets   = list_resource(session, "datasets")
-    dashboards = list_resource(session, "dashboards")
+    # ── 2. Discover items ────────────────────────────────────────────────────────────
+    print("\n[2/3] Discovering workspace items …")
+    items = list_workspace_items(session)
+    print(f"  Found {len(items)} item(s)")
 
-    print(f"  Reports:    {len(reports)}")
-    print(f"  Dataflows:  {len(dataflows)}")
-    print(f"  Datasets:   {len(datasets)}")
-    print(f"  Dashboards: {len(dashboards)}")
+    type_counts: dict[str, int] = {}
+    for item in items:
+        t = item.get("type", "Unknown")
+        type_counts[t] = type_counts.get(t, 0) + 1
+    for t, c in sorted(type_counts.items()):
+        print(f"    {t:<40} {c}")
 
-    # Export reports
-    print("\n[3/6] Exporting reports …")
-    for report in reports:
-        print(f"  → {report.get('name')}  [{report.get('reportType', 'PowerBIReport')}]")
+    # ── 3. Download source definitions ─────────────────────────────────────────────
+    print("\n[3/3] Downloading source definitions …")
+    skipped: list = []
+
+    for item in items:
+        item_id   = item["id"]
+        item_name = item.get("displayName", item_id)
+        item_type = item.get("type", "Unknown")
+
+        print(f"\n  [{item_type}]  {item_name}")
+
+        if item_type in NO_DEFINITION_TYPES:
+            print(f"    SKIP – {item_type} does not expose a source definition")
+            skipped.append({**item, "skipReason": "no getDefinition support"})
+            continue
+
         try:
-            export_report_source(session, report)
+            definition = get_item_definition(session, item_id)
+            if definition is None:
+                print("    SKIP – getDefinition not supported or returned nothing")
+                skipped.append({**item, "skipReason": "getDefinition returned nothing"})
+            else:
+                save_definition(item_name, item_type, definition)
         except Exception as exc:
-            print(f"    ERROR exporting report {report.get('name')}: {exc}")
+            print(f"    ERROR – {exc}")
+            skipped.append({**item, "skipReason": str(exc)})
 
-    # Export dataflows
-    print("\n[4/6] Exporting dataflows …")
-    for df in dataflows:
-        print(f"  → {df.get('name')}")
-        try:
-            export_dataflow(session, df)
-        except Exception as exc:
-            print(f"    ERROR exporting dataflow {df.get('name')}: {exc}")
+    write_manifest(items, skipped)
 
-    # Export dataset metadata
-    print("\n[5/6] Exporting dataset metadata …")
-    for ds in datasets:
-        print(f"  → {ds.get('name')}")
-        try:
-            export_dataset_metadata(session, ds)
-        except Exception as exc:
-            print(f"    ERROR exporting dataset {ds.get('name')}: {exc}")
-
-    # Export dashboard metadata
-    print("\n[6/6] Exporting dashboard metadata …")
-    for db in dashboards:
-        print(f"  → {db.get('displayName')}")
-        try:
-            export_dashboard_metadata(session, db)
-        except Exception as exc:
-            print(f"    ERROR exporting dashboard {db.get('displayName')}: {exc}")
-
-    # Write manifest
-    write_workspace_manifest(reports, dataflows, datasets, dashboards)
-    print("\n=== Sync complete ===")
+    total_saved = len(items) - len(skipped)
+    print(f"\n  Saved  : {total_saved} item(s)")
+    print(f"  Skipped: {len(skipped)} item(s)")
+    print("\n=== Backup complete ===")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,18 @@
 # =============================================================================
 # WorkspaceSync.yml
 #
-# Authenticates to the Power BI REST API as a Service Principal, discovers
-# every artefact in the target workspace (reports, paginated reports,
-# dataflows, datasets, dashboards), downloads / exports each one, and commits
-# the result to the main branch.  New content always overwrites existing files.
+# Authenticates to the Microsoft Fabric REST API as a Service Principal,
+# discovers every item in the target workspace (Notebooks, Semantic Models,
+# Reports, Lakehouses, DataPipelines, Warehouses, KQL Databases, etc.),
+# downloads the source definition files for each one, and commits the result
+# to the main branch.  New content always overwrites existing files.
 #
 # Required GitHub Secrets
 # -----------------------
 #   POWERBI_TENANT_ID     – Azure AD tenant ID
 #   POWERBI_CLIENT_ID     – Service Principal application (client) ID
 #   POWERBI_CLIENT_SECRET – Service Principal client secret
-#   POWERBI_WORKSPACE_ID  – Power BI workspace (group) ID to sync
+#   POWERBI_WORKSPACE_ID  – Fabric workspace ID to sync
 #
 # The GITHUB_TOKEN secret is provided automatically by GitHub Actions and is
 # used for the final git push.  No additional PAT is needed as long as the
@@ -19,7 +20,7 @@
 # (Settings → Actions → General → Workflow permissions → Read and write).
 # =============================================================================
 
-name: Power BI Workspace Sync
+name: Fabric Workspace Source Backup
 
 on:
   # Run automatically every day at 02:00 UTC
@@ -39,11 +40,11 @@ on:
 env:
   PYTHON_VERSION: '3.12'
   # All downloaded artefacts land under this directory inside the repository
-  OUTPUT_DIR: powerbi
+  OUTPUT_DIR: fabric
 
 jobs:
   sync:
-    name: Sync Power BI Workspace to Repository
+    name: Sync Fabric Workspace to Repository
     runs-on: ubuntu-latest
 
     # Give the GITHUB_TOKEN permission to push commits
@@ -78,10 +79,11 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 3. Run the sync script
-      #    The script writes all artefacts under the 'powerbi/' directory tree.
+      #    The script calls the Fabric getDefinition API and writes source
+      #    files under the 'fabric/' directory tree.
       #    New content overwrites existing files; nothing is deleted.
       # -----------------------------------------------------------------------
-      - name: Sync Power BI workspace
+      - name: Sync Fabric workspace source files
         env:
           TENANT_ID:     ${{ secrets.POWERBI_TENANT_ID }}
           CLIENT_ID:     ${{ secrets.POWERBI_CLIENT_ID }}
@@ -111,7 +113,7 @@ jobs:
             echo "No changes detected – workspace is already up to date."
           else
             TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            git commit -m "chore: sync Power BI workspace [${TIMESTAMP}]"
+            git commit -m "chore: sync Fabric workspace source files [${TIMESTAMP}]"
 
             # Push; --force-with-lease is safer than --force but still
             # overwrites any diverged state caused by concurrent runs
