@@ -51,6 +51,7 @@ SOURCE_ROOT  = pathlib.Path("fabric")
 # Item types that have no deployable definition – skip them entirely
 NO_DEPLOY_TYPES = {
     "SQLAnalyticsEndpoint",  # auto-generated from Lakehouse; cannot be deployed
+    "SQLEndpoint",           # variant name for the same auto-generated endpoint
     "Dashboard",             # service-only; no source definition
     "MountedWarehouse",
     "MountedDataFactory",

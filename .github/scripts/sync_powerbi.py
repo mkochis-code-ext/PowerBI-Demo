@@ -63,6 +63,7 @@ OUTPUT_ROOT   = pathlib.Path("fabric")
 # source definition.
 NO_DEFINITION_TYPES = {
     "SQLAnalyticsEndpoint",   # auto-generated from Lakehouse
+    "SQLEndpoint",            # variant name for the same auto-generated endpoint
     "Dashboard",              # service-only construct, no source file
     "MountedWarehouse",
     "MountedDataFactory",
