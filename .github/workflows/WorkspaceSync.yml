@@ -71,9 +71,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: .github/scripts/requirements.txt
 
       - name: Install Python dependencies
-        run: pip install --upgrade requests
+        run: pip install -r .github/scripts/requirements.txt
 
       # -----------------------------------------------------------------------
       # 3. Run the sync script
