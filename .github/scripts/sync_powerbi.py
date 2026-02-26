@@ -110,22 +110,31 @@ def get_access_token(scope: str) -> str:
 # inside the archive rather than the outer bytes.
 ZIP_EXTENSIONS = {".dacpac", ".bacpac", ".nupkg"}
 
+# Member files inside ZIP archives that contain volatile build metadata
+# (timestamps, checksums) regenerated on every Fabric export.  These are
+# excluded from the content-change comparison so that an unchanged schema
+# is not falsely flagged as modified.
+ZIP_VOLATILE_MEMBERS = {"DacMetadata.xml", "Origin.xml"}
+
 
 def _zip_contents_equal(a: bytes, b: bytes) -> bool:
     """Return True if two ZIP archives contain identical member files.
 
     Compares only the central-directory metadata (file names, CRC-32
     checksums, and uncompressed sizes) without decompressing any data.
-    This is very fast because the ZIP central directory is a small
-    structure at the tail of the archive that ``zipfile`` reads on open.
+    Members listed in ``ZIP_VOLATILE_MEMBERS`` (e.g. DacMetadata.xml,
+    Origin.xml) are excluded because Fabric regenerates them with fresh
+    timestamps on every export even when the schema is unchanged.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(a)) as za, zipfile.ZipFile(io.BytesIO(b)) as zb:
             entries_a = sorted(
                 (i.filename, i.CRC, i.file_size) for i in za.infolist()
+                if i.filename not in ZIP_VOLATILE_MEMBERS
             )
             entries_b = sorted(
                 (i.filename, i.CRC, i.file_size) for i in zb.infolist()
+                if i.filename not in ZIP_VOLATILE_MEMBERS
             )
             return entries_a == entries_b
     except (zipfile.BadZipFile, Exception):
