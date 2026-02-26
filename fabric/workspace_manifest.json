@@ -1,6 +1,6 @@
 {
   "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-  "syncedAt": "2026-02-25T15:16:12Z",
+  "syncedAt": "2026-02-26T04:21:22Z",
   "totalItems": 10,
   "skippedCount": 2,
   "byType": {
@@ -90,7 +90,7 @@
       "displayName": "DemoLakehouse",
       "description": "",
       "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
+      "skipReason": "no getDefinition support"
     },
     {
       "id": "a377bb65-a7cd-4b63-8a84-b0c6c86a52d5",
@@ -98,7 +98,7 @@
       "displayName": "Test",
       "description": "",
       "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
+      "skipReason": "no getDefinition support"
     }
   ]
 }
