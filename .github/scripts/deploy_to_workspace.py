@@ -282,13 +282,22 @@ def _bytes_equal(a: bytes, b: bytes, path: str) -> bool:
 def get_remote_definition(
     session: requests.Session,
     item_id: str,
+    item_type: str = "",
 ) -> dict | None:
     """Download the current definition of an item from the target workspace.
+
+    For item types that require a specific format (e.g. SemanticModel → TMDL),
+    the format is included in the request body so the returned parts use the
+    same layout as the repo.
 
     Returns the definition dict or None if unavailable.
     """
     url  = f"{FABRIC_BASE}/workspaces/{TARGET_WORKSPACE_ID}/items/{item_id}/getDefinition"
-    resp = session.post(url, timeout=60)
+
+    # Request the same format we upload in, so the parts are comparable
+    fmt = FORMAT_BY_TYPE.get(item_type.lower(), "") if item_type else ""
+    body = {"format": fmt} if fmt else None
+    resp = session.post(url, json=body, timeout=60)
 
     if resp.status_code in (400, 404):
         return None
@@ -355,12 +364,19 @@ def definitions_match(
 
     # Compare file sets
     if set(local_by_path.keys()) != set(remote_by_path.keys()):
+        local_only  = set(local_by_path.keys()) - set(remote_by_path.keys())
+        remote_only = set(remote_by_path.keys()) - set(local_by_path.keys())
+        if local_only:
+            print(f"      File set mismatch – local only: {local_only}")
+        if remote_only:
+            print(f"      File set mismatch – remote only: {remote_only}")
         return False
 
     # Compare content of each file
     for path, local_data in local_by_path.items():
         remote_data = remote_by_path[path]
         if not _bytes_equal(local_data, remote_data, path):
+            print(f"      Content differs: {path}")
             return False
 
     return True
@@ -839,7 +855,7 @@ def main():
             if existing_id:
                 # ── Compare with remote before updating ──────────────
                 print(f"    Comparing with remote definition {existing_id} …")
-                remote_def = get_remote_definition(session, existing_id)
+                remote_def = get_remote_definition(session, existing_id, item_type)
                 if definitions_match(parts, remote_def):
                     print("    — No changes detected, skipping update")
                     results["skipped"] += 1
