@@ -20,7 +20,7 @@
 # (Settings → Actions → General → Workflow permissions → Read and write).
 # =============================================================================
 
-name: Fabric Workspace Source Backup
+name: PowerBI Workspace Source Backup
 
 on:
   # Run automatically every day at 02:00 UTC

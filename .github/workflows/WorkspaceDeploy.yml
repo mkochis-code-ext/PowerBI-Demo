@@ -1,5 +1,5 @@
 
-name: Fabric Workspace Deploy
+name: PowerBI Workspace Deploy
 
 on:
   workflow_dispatch:
@@ -19,6 +19,13 @@ on:
           - both
           - test-only
           - prod-only
+      item:
+        description: >
+          (Optional) Deploy a single item and its dependencies instead of the
+          full workspace.  Use the folder name, e.g. "Add Calculated Measure.Notebook".
+          Leave blank for a full deploy.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -35,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit || 'main' }}
+          ref: ${{ inputs.commit || 'dev' }}
           fetch-depth: 0
 
       - name: Resolve SHA
@@ -80,6 +87,7 @@ jobs:
           CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
           CLIENT_SECRET:       ${{ secrets.POWERBI_CLIENT_SECRET }}
           TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_TEST_WORKSPACE_ID }}
+          DEPLOY_ITEM:         ${{ inputs.item }}
         run: |
           echo "Deploying commit ${{ needs.resolve-commit.outputs.sha }} → PowerBI-TEST"
           python .github/scripts/deploy_to_workspace.py
@@ -123,6 +131,7 @@ jobs:
           CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
           CLIENT_SECRET:       ${{ secrets.POWERBI_CLIENT_SECRET }}
           TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_PROD_WORKSPACE_ID }}
+          DEPLOY_ITEM:         ${{ inputs.item }}
         run: |
           echo "Deploying commit ${{ needs.resolve-commit.outputs.sha }} → PowerBI-PROD"
           python .github/scripts/deploy_to_workspace.py

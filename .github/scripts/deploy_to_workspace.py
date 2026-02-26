@@ -2,17 +2,34 @@
 deploy_to_workspace.py  –  Fabric Workspace Deployer
 
 Reads the 'fabric/' directory tree (written by sync_powerbi.py / the
-WorkspaceSync pipeline) and pushes every item definition to a target Fabric
-workspace via the REST API.  The workspace is made to exactly mirror the
-repository – new items are created, existing items are overwritten, and any
-items present in the workspace but absent from the repo are deleted.
+WorkspaceSync pipeline) and pushes item definitions to a target Fabric
+workspace via the REST API.
 
-  For each <DisplayName>.<ItemType> folder found in fabric/:
-    • If the item already exists in the target workspace (matched by
-      displayName + type):   POST  …/items/{id}/updateDefinition
-    • If the item does not exist:   POST  …/items  (create with definition)
-    • Items in the workspace not present in the repo are deleted
-    • Item types with no deployable definition are skipped gracefully
+Modes of operation
+------------------
+  • DEPLOY_ITEM not set  →  Full deploy.  The workspace is made to exactly
+    mirror the repository: new items are created, existing items are
+    overwritten, and items present in the workspace but absent from the repo
+    are deleted.
+
+  • DEPLOY_ITEM set (e.g. "Add Calculated Measure.Notebook")  →  Selective
+    deploy.  Only the named item and all of its transitive dependencies are
+    deployed.  Nothing is deleted.
+
+For each item that is deployed:
+  • If the item already exists in the target workspace (matched by
+    displayName + type):   POST  …/items/{id}/updateDefinition
+  • If the item does not exist:   POST  …/items  (create with definition)
+  • Item types with no deployable definition are skipped gracefully
+
+Dependency resolution
+---------------------
+Dependencies are discovered by scanning item source files for cross-item
+references:
+  • Notebook  → META JSON blocks referencing lakehouses and environments
+  • SemanticModel expressions.tmdl  → Sql.Database() references to lakehouses
+  • Report definition.pbir  → datasetReference pointing to semantic models
+Dependencies are resolved transitively (deps of deps are included).
 
 The .platform file (Fabric Git-integration metadata) is intentionally
 excluded from the parts list sent to the API.
@@ -23,6 +40,7 @@ TENANT_ID            – Azure AD tenant ID
 CLIENT_ID            – Service Principal application (client) ID
 CLIENT_SECRET        – Service Principal client secret
 TARGET_WORKSPACE_ID  – Fabric workspace ID to deploy into
+DEPLOY_ITEM          – (optional) <DisplayName>.<ItemType> to selectively deploy
 """
 
 import os
@@ -47,6 +65,9 @@ FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 AUTH_URL     = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
 SOURCE_ROOT  = pathlib.Path("fabric")
+
+# Optional: selective deploy mode
+DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()
 
 # Item types that have no deployable definition – skip them entirely
 NO_DEPLOY_TYPES = {
@@ -280,6 +301,235 @@ def iter_item_dirs(source: pathlib.Path):
 
 
 # ---------------------------------------------------------------------------
+# Dependency resolution
+# ---------------------------------------------------------------------------
+
+def _extract_meta_json(content: str) -> list[dict]:
+    """
+    Extract all META JSON blocks from notebook .py content.
+
+    Lines look like:
+        # META {
+        # META   "key": "value"
+        # META }
+    We strip the ``# META `` prefix from each line, track brace depth, and
+    parse the resulting JSON when the top-level block closes.
+    """
+    PREFIX = "# META"
+    results: list[dict] = []
+    current_lines: list[str] = []
+    in_meta = False
+    brace_depth = 0
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(PREFIX):
+            if in_meta:
+                # end of contiguous META lines – reset
+                in_meta = False
+                current_lines.clear()
+                brace_depth = 0
+            continue
+
+        json_part = stripped[len(PREFIX):].strip()
+        if not json_part:
+            continue
+
+        if not in_meta:
+            if "{" in json_part:
+                in_meta = True
+                brace_depth = 0
+                current_lines = []
+            else:
+                continue
+
+        current_lines.append(json_part)
+        brace_depth += json_part.count("{") - json_part.count("}")
+
+        if brace_depth <= 0 and in_meta:
+            json_str = "\n".join(current_lines)
+            try:
+                results.append(json.loads(json_str))
+            except json.JSONDecodeError:
+                pass
+            current_lines = []
+            in_meta = False
+
+    return results
+
+
+def _parse_notebook_deps(
+    item_dir: pathlib.Path,
+    name_index: dict[str, str],
+    type_index: dict[str, list[str]],
+) -> set[str]:
+    """
+    Scan notebook .py files for META dependency blocks.
+
+    Returns a set of repo folder names that this notebook depends on.
+    """
+    deps: set[str] = set()
+    for py_file in item_dir.rglob("*.py"):
+        content = py_file.read_text(encoding="utf-8", errors="replace")
+        for meta in _extract_meta_json(content):
+            dependencies = meta.get("dependencies", {})
+
+            # ── Lakehouse ──
+            lakehouse = dependencies.get("lakehouse", {})
+            lh_name = lakehouse.get("default_lakehouse_name")
+            if lh_name:
+                key = f"{lh_name}.lakehouse"
+                if key in name_index:
+                    deps.add(name_index[key])
+
+            # ── Environment (no name in META – include all Environment items) ──
+            if "environment" in dependencies:
+                for env_folder in type_index.get("environment", []):
+                    deps.add(env_folder)
+    return deps
+
+
+def _parse_semantic_model_deps(
+    item_dir: pathlib.Path,
+    name_index: dict[str, str],
+    type_index: dict[str, list[str]],
+) -> set[str]:
+    """
+    Scan .tmdl files for Sql.Database() calls (indicating a Lakehouse
+    SQL endpoint dependency).
+    """
+    deps: set[str] = set()
+    for tmdl_file in item_dir.rglob("*.tmdl"):
+        content = tmdl_file.read_text(encoding="utf-8", errors="replace")
+        if "Sql.Database" in content:
+            # The connection string contains workspace-specific GUIDs which
+            # cannot be directly mapped to a repo folder name.  Include all
+            # Lakehouse items as dependencies.
+            for lh_folder in type_index.get("lakehouse", []):
+                deps.add(lh_folder)
+    return deps
+
+
+def _parse_report_deps(
+    item_dir: pathlib.Path,
+    name_index: dict[str, str],
+    type_index: dict[str, list[str]],
+) -> set[str]:
+    """
+    Scan .pbir files for datasetReference → semantic model dependency.
+    """
+    deps: set[str] = set()
+    for pbir_file in item_dir.rglob("*.pbir"):
+        content = pbir_file.read_text(encoding="utf-8", errors="replace")
+        try:
+            pbir = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        ds_ref = pbir.get("datasetReference", {})
+        by_path = ds_ref.get("byPath", {})
+        ds_name = by_path.get("datasetName")
+        if ds_name:
+            key = f"{ds_name}.semanticmodel"
+            if key in name_index:
+                deps.add(name_index[key])
+    return deps
+
+
+# Per-type dependency parsers keyed by LOWER-CASED item type.
+_DEP_PARSERS: dict = {
+    "notebook":      _parse_notebook_deps,
+    "semanticmodel": _parse_semantic_model_deps,
+    "report":        _parse_report_deps,
+}
+
+
+def build_dependency_graph(source: pathlib.Path) -> dict[str, set[str]]:
+    """
+    Return ``{folder_name: {dep_folder_name, …}}`` for every item in the repo.
+
+    ``name_index`` : lowered folder name  →  actual folder name
+    ``type_index`` : lowered item type    →  [folder_name, …]
+    """
+    name_index: dict[str, str] = {}
+    type_index: dict[str, list[str]] = {}
+
+    for item_dir in sorted(source.iterdir()):
+        if not item_dir.is_dir():
+            continue
+        folder = item_dir.name
+        dot_pos = folder.rfind(".")
+        if dot_pos == -1:
+            continue
+        item_type = folder[dot_pos + 1:]
+        name_index[folder.lower()] = folder
+        type_index.setdefault(item_type.lower(), []).append(folder)
+
+    graph: dict[str, set[str]] = {}
+    for folder in name_index.values():
+        dot_pos = folder.rfind(".")
+        item_type = folder[dot_pos + 1:].lower()
+        item_dir = source / folder
+
+        parser = _DEP_PARSERS.get(item_type)
+        if parser:
+            graph[folder] = parser(item_dir, name_index, type_index)
+        else:
+            graph[folder] = set()
+
+    return graph
+
+
+def resolve_transitive(
+    graph: dict[str, set[str]],
+    start: str,
+) -> set[str]:
+    """Return ``start`` plus all of its transitive dependencies."""
+    result: set[str] = set()
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        if current in result:
+            continue
+        result.add(current)
+        for dep in graph.get(current, set()):
+            if dep not in result:
+                stack.append(dep)
+    return result
+
+
+def topo_sort(items: set[str], graph: dict[str, set[str]]) -> list[str]:
+    """Return *items* in dependency-first order (topological sort)."""
+    result: list[str] = []
+    visited: set[str] = set()
+
+    def visit(item: str) -> None:
+        if item in visited:
+            return
+        visited.add(item)
+        for dep in sorted(graph.get(item, set())):
+            if dep in items:
+                visit(dep)
+        result.append(item)
+
+    for item in sorted(items):
+        visit(item)
+    return result
+
+
+def find_item_folder(source: pathlib.Path, user_input: str) -> str | None:
+    """
+    Case-insensitive match of *user_input* against folder names under *source*.
+
+    Returns the actual folder name or ``None``.
+    """
+    target = user_input.strip().lower()
+    for item_dir in sorted(source.iterdir()):
+        if item_dir.is_dir() and item_dir.name.lower() == target:
+            return item_dir.name
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -287,14 +537,43 @@ def main():
     print("=== Fabric Workspace Deployer ===")
     print(f"Source    : {SOURCE_ROOT.resolve()}")
     print(f"Target    : {TARGET_WORKSPACE_ID}")
+    selective = bool(DEPLOY_ITEM)
+    if selective:
+        print(f"Mode      : Selective deploy  →  {DEPLOY_ITEM}")
+    else:
+        print("Mode      : Full deploy")
 
     if not SOURCE_ROOT.is_dir():
         print(f"\nERROR: Source directory '{SOURCE_ROOT}' not found.", file=sys.stderr)
         print("Make sure the repository was checked out at the correct commit.", file=sys.stderr)
         sys.exit(1)
 
+    # ── 0. Resolve deploy set (selective mode) ───────────────────────────────
+    deploy_folders: set[str] | None = None  # None ⇒ deploy everything
+
+    if selective:
+        matched_folder = find_item_folder(SOURCE_ROOT, DEPLOY_ITEM)
+        if not matched_folder:
+            print(f"\nERROR: No item matching '{DEPLOY_ITEM}' found in {SOURCE_ROOT}/",
+                  file=sys.stderr)
+            print("Available items:", file=sys.stderr)
+            for d in sorted(SOURCE_ROOT.iterdir()):
+                if d.is_dir() and "." in d.name:
+                    print(f"  • {d.name}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\n[0] Resolving dependencies for {matched_folder} …")
+        dep_graph = build_dependency_graph(SOURCE_ROOT)
+        deploy_folders = resolve_transitive(dep_graph, matched_folder)
+        ordered = topo_sort(deploy_folders, dep_graph)
+        print(f"  Will deploy {len(deploy_folders)} item(s) (in dependency order):")
+        for f in ordered:
+            tag = " ← requested" if f == matched_folder else "   (dependency)"
+            print(f"    • {f}{tag}")
+
     # ── 1. Authenticate ──────────────────────────────────────────────────────
-    print("\n[1/3] Authenticating as Service Principal …")
+    step = "[1/3]" if selective else "[1/4]"
+    print(f"\n{step} Authenticating as Service Principal …")
     token   = get_access_token()
     session = requests.Session()
     session.headers.update({
@@ -304,18 +583,36 @@ def main():
     print("  OK")
 
     # ── 2. Inventory target workspace ────────────────────────────────────────
-    print("\n[2/3] Inventorying target workspace …")
+    step = "[2/3]" if selective else "[2/4]"
+    print(f"\n{step} Inventorying target workspace …")
     existing = list_workspace_items(session)
     print(f"  Found {len(existing)} existing item(s) in workspace")
 
     # ── 3. Deploy items ──────────────────────────────────────────────────────
-    print("\n[3/4] Deploying items …")
+    step = "[3/3]" if selective else "[3/4]"
+    print(f"\n{step} Deploying items …")
     results = {"deployed": 0, "created": 0, "deleted": 0, "skipped": 0, "errors": 0}
 
     # Track which (name, type) keys are in the repo so we can delete extras
     repo_keys: set[tuple[str, str]] = set()
 
-    for display_name, item_type, item_dir in iter_item_dirs(SOURCE_ROOT):
+    # Determine iteration order
+    if selective:
+        # Use the topologically sorted list so deps are created first
+        ordered_items = []
+        ordered_set = topo_sort(deploy_folders, dep_graph)  # type: ignore[arg-type]
+        for folder_name in ordered_set:
+            dot_pos = folder_name.rfind(".")
+            if dot_pos == -1:
+                continue
+            display_name = folder_name[:dot_pos]
+            item_type = folder_name[dot_pos + 1:]
+            item_dir = SOURCE_ROOT / folder_name
+            ordered_items.append((display_name, item_type, item_dir))
+    else:
+        ordered_items = list(iter_item_dirs(SOURCE_ROOT))
+
+    for display_name, item_type, item_dir in ordered_items:
         print(f"\n  [{item_type}]  {display_name}")
 
         if item_type in NO_DEPLOY_TYPES:
@@ -355,29 +652,32 @@ def main():
             print(f"    ERROR – {exc}")
             results["errors"] += 1
 
-    # ── 4. Delete workspace items not in the repo ────────────────────────────
-    print("\n[4/4] Removing items not present in repo …")
-    # Re-fetch full item list to catch any items not matched during deploy
-    all_ws_items = list_workspace_items_full(session)
-    for ws_item in all_ws_items:
-        ws_name = ws_item.get("displayName", "")
-        ws_type = ws_item.get("type", "")
-        ws_key  = (ws_name.lower(), ws_type.lower())
-        ws_id   = ws_item["id"]
+    # ── 4. Delete workspace items not in the repo (full deploy only) ─────────
+    if selective:
+        print("\n  (Selective deploy – skipping delete step)")
+    else:
+        print("\n[4/4] Removing items not present in repo …")
+        # Re-fetch full item list to catch any items not matched during deploy
+        all_ws_items = list_workspace_items_full(session)
+        for ws_item in all_ws_items:
+            ws_name = ws_item.get("displayName", "")
+            ws_type = ws_item.get("type", "")
+            ws_key  = (ws_name.lower(), ws_type.lower())
+            ws_id   = ws_item["id"]
 
-        # Skip types that have no repo representation
-        if ws_type in NO_DEPLOY_TYPES:
-            continue
+            # Skip types that have no repo representation
+            if ws_type in NO_DEPLOY_TYPES:
+                continue
 
-        if ws_key not in repo_keys:
-            print(f"  [{ws_type}]  {ws_name}")
-            try:
-                delete_item(session, ws_id)
-                print(f"    ✓ Deleted  {ws_id}")
-                results["deleted"] += 1
-            except Exception as exc:
-                print(f"    ERROR deleting – {exc}")
-                results["errors"] += 1
+            if ws_key not in repo_keys:
+                print(f"  [{ws_type}]  {ws_name}")
+                try:
+                    delete_item(session, ws_id)
+                    print(f"    ✓ Deleted  {ws_id}")
+                    results["deleted"] += 1
+                except Exception as exc:
+                    print(f"    ERROR deleting – {exc}")
+                    results["errors"] += 1
 
     print(f"\n  Updated : {results['deployed']}")
     print(f"  Created : {results['created']}")
