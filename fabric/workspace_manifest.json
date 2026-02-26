@@ -1,8 +1,8 @@
 {
   "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-  "syncedAt": "2026-02-26T14:55:45Z",
+  "syncedAt": "2026-02-26T15:24:40Z",
   "totalItems": 11,
-  "skippedCount": 2,
+  "skippedCount": 3,
   "byType": {
     "Environment": 1,
     "Lakehouse": 1,
@@ -91,6 +91,14 @@
     }
   ],
   "skippedItems": [
+    {
+      "id": "30b43571-68e0-4c6d-ac75-a7970b3aea49",
+      "type": "SemanticModel",
+      "displayName": "demo_semantic_model",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
+      "skipReason": "getDefinition returned nothing"
+    },
     {
       "id": "1623fbb9-f8c8-4eb9-8259-f377130adf62",
       "type": "SQLEndpoint",
