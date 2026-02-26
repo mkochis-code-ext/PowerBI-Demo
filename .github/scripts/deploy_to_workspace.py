@@ -87,17 +87,17 @@ FORMAT_BY_TYPE: dict[str, str] = {
 }
 
 # Item types that can be created (name + type) but whose definition cannot
-# be uploaded or updated via the definition API.  If they already exist in
-# the target workspace they are left as-is.
+# be uploaded or updated via the definition API.  When such an item already
+# exists in the target workspace it is deleted and re-created.
 METADATA_ONLY_TYPES = {
     "Lakehouse",
     "Environment",
     "Warehouse",
 }
 
-# The .platform file is Fabric Git-integration metadata only; the API does
-# not accept it as part of a definition payload.
-EXCLUDED_FILES = {".platform"}
+# Files to exclude from the definition parts list.  The .platform file is
+# now included because the API requires it when updateMetadata=true.
+EXCLUDED_FILES: set[str] = set()
 
 # Long-running operation poll settings
 POLL_INTERVAL = 5    # seconds between polls
@@ -678,18 +678,24 @@ def main():
         # ── Metadata-only types (Lakehouse, Environment, …) ──────────────
         if item_type in METADATA_ONLY_TYPES:
             if existing_id:
-                print(f"    OK – already exists ({existing_id}), definition update not supported")
-                results["skipped"] += 1
-            else:
-                print("    Creating new item (metadata-only – no definition upload) …")
+                print(f"    Deleting existing item {existing_id} for re-creation …")
                 try:
-                    new_id = create_item_no_definition(session, display_name, item_type)
-                    print(f"    ✓ Created  {new_id}")
-                    existing[lookup_key] = new_id
-                    results["created"] += 1
+                    delete_item(session, existing_id)
+                    print("    ✓ Deleted")
+                    results["deleted"] += 1
                 except Exception as exc:
-                    print(f"    ERROR – {exc}")
+                    print(f"    ERROR deleting – {exc}")
                     results["errors"] += 1
+                    continue
+            print("    Creating item (metadata-only – no definition upload) …")
+            try:
+                new_id = create_item_no_definition(session, display_name, item_type)
+                print(f"    ✓ Created  {new_id}")
+                existing[lookup_key] = new_id
+                results["created"] += 1
+            except Exception as exc:
+                print(f"    ERROR – {exc}")
+                results["errors"] += 1
             continue
 
         # ── Normal types with deployable definitions ─────────────────────
