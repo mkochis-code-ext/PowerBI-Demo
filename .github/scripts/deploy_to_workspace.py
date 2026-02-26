@@ -726,27 +726,8 @@ def main():
                 results["created"] += 1
 
         except UpdateFailed as exc:
-            if not existing_id:
-                print(f"    ERROR – {exc}")
-                results["errors"] += 1
-                continue
-            # Fallback: delete the item and recreate with definition
-            print(f"    Update not supported – falling back to delete + recreate …")
-            print(f"      Reason: {exc}")
-            try:
-                delete_item(session, existing_id)
-                print(f"    ✓ Deleted  {existing_id}")
-                new_id = create_item_with_definition(session, display_name, item_type, parts)
-                print(f"    ✓ Recreated  {new_id}")
-                existing[lookup_key] = new_id
-                results["deployed"] += 1
-            except Exception as exc2:
-                print(f"    ERROR during recreate – {exc2}")
-                results["errors"] += 1
-
-        except ValueError as exc:
-            print(f"    SKIP – {exc}")
-            results["skipped"] += 1
+            print(f"    ERROR – {exc}")
+            results["errors"] += 1
         except Exception as exc:
             print(f"    ERROR – {exc}")
             results["errors"] += 1
