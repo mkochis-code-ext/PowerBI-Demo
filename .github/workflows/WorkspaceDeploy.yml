@@ -64,10 +64,18 @@ jobs:
       PYTHON_VERSION: '3.12'
 
     steps:
-      - name: Checkout repository at target commit
+      - name: Checkout main (pipeline scripts)
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve-commit.outputs.sha }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Overlay fabric/ from target branch
+        run: |
+          git fetch origin ${{ inputs.branch || 'dev' }}
+          git checkout origin/${{ inputs.branch || 'dev' }} -- fabric/
+          echo "Pipeline scripts from: main"
+          echo "Fabric content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -87,7 +95,7 @@ jobs:
           TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_TEST_WORKSPACE_ID }}
           DEPLOY_ITEM:         ${{ inputs.item }}
         run: |
-          echo "Deploying commit ${{ needs.resolve-commit.outputs.sha }} → PowerBI-TEST"
+          echo "Deploying branch '${{ inputs.branch || 'dev' }}' (${{ needs.resolve-commit.outputs.sha }}) → PowerBI-TEST"
           python .github/scripts/deploy_to_workspace.py
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -109,10 +117,18 @@ jobs:
       PYTHON_VERSION: '3.12'
 
     steps:
-      - name: Checkout repository at target commit
+      - name: Checkout main (pipeline scripts)
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve-commit.outputs.sha }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Overlay fabric/ from target branch
+        run: |
+          git fetch origin ${{ inputs.branch || 'dev' }}
+          git checkout origin/${{ inputs.branch || 'dev' }} -- fabric/
+          echo "Pipeline scripts from: main"
+          echo "Fabric content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -132,5 +148,5 @@ jobs:
           TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_PROD_WORKSPACE_ID }}
           DEPLOY_ITEM:         ${{ inputs.item }}
         run: |
-          echo "Deploying commit ${{ needs.resolve-commit.outputs.sha }} → PowerBI-PROD"
+          echo "Deploying branch '${{ inputs.branch || 'dev' }}' (${{ needs.resolve-commit.outputs.sha }}) → PowerBI-PROD"
           python .github/scripts/deploy_to_workspace.py

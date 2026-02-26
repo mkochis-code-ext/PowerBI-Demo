@@ -86,6 +86,15 @@ FORMAT_BY_TYPE: dict[str, str] = {
     "semanticmodel": "TMDL",
 }
 
+# Item types that can be created (name + type) but whose definition cannot
+# be uploaded or updated via the definition API.  If they already exist in
+# the target workspace they are left as-is.
+METADATA_ONLY_TYPES = {
+    "Lakehouse",
+    "Environment",
+    "Warehouse",
+}
+
 # The .platform file is Fabric Git-integration metadata only; the API does
 # not accept it as part of a definition payload.
 EXCLUDED_FILES = {".platform"}
@@ -287,6 +296,22 @@ def create_item_with_definition(
         "type":        item_type,
     }
     body.update(_definition_body(parts, item_type))
+    resp   = session.post(url, json=body, timeout=120)
+    result = handle_response(session, resp)
+    return result.get("id", "")
+
+
+def create_item_no_definition(
+    session: requests.Session,
+    display_name: str,
+    item_type: str,
+) -> str:
+    """Create an item with only name + type (no definition parts)."""
+    url  = f"{FABRIC_BASE}/workspaces/{TARGET_WORKSPACE_ID}/items"
+    body = {
+        "displayName": display_name,
+        "type":        item_type,
+    }
     resp   = session.post(url, json=body, timeout=120)
     result = handle_response(session, resp)
     return result.get("id", "")
@@ -646,15 +671,33 @@ def main():
             results["skipped"] += 1
             continue
 
+        lookup_key = (display_name.lower(), item_type.lower())
+        repo_keys.add(lookup_key)
+        existing_id = existing.get(lookup_key)
+
+        # ── Metadata-only types (Lakehouse, Environment, …) ──────────────
+        if item_type in METADATA_ONLY_TYPES:
+            if existing_id:
+                print(f"    OK – already exists ({existing_id}), definition update not supported")
+                results["skipped"] += 1
+            else:
+                print("    Creating new item (metadata-only – no definition upload) …")
+                try:
+                    new_id = create_item_no_definition(session, display_name, item_type)
+                    print(f"    ✓ Created  {new_id}")
+                    existing[lookup_key] = new_id
+                    results["created"] += 1
+                except Exception as exc:
+                    print(f"    ERROR – {exc}")
+                    results["errors"] += 1
+            continue
+
+        # ── Normal types with deployable definitions ─────────────────────
         parts = build_parts(item_dir)
         if not parts:
             print("    SKIP – no deployable files found in folder")
             results["skipped"] += 1
             continue
-
-        lookup_key = (display_name.lower(), item_type.lower())
-        repo_keys.add(lookup_key)
-        existing_id = existing.get(lookup_key)
 
         try:
             if existing_id:
