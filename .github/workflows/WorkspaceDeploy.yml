@@ -4,12 +4,10 @@ name: PowerBI Workspace Deploy
 on:
   workflow_dispatch:
     inputs:
-      commit:
-        description: >
-          Commit SHA to deploy (leave blank to use the latest commit on main).
-          The fabric/ directory at this commit will be pushed to both workspaces.
+      branch:
+        description: 'Branch to deploy from'
         required: false
-        default: ''
+        default: 'dev'
       environment:
         description: 'Target environment(s) to deploy'
         required: false
@@ -42,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit || 'dev' }}
+          ref: ${{ inputs.branch || 'dev' }}
           fetch-depth: 0
 
       - name: Resolve SHA
@@ -50,7 +48,7 @@ jobs:
         run: |
           SHA=$(git rev-parse HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Deploying commit: $SHA"
+          echo "Deploying branch '${{ inputs.branch || 'dev' }}' at commit: $SHA"
 
   # ─────────────────────────────────────────────────────────────────────────
   # Deploy to TEST
@@ -103,6 +101,7 @@ jobs:
     # The 'always()' guard lets prod-only bypass the skipped test job.
     if: |
       always() &&
+      inputs.environment != 'test-only' &&
       (inputs.environment == 'prod-only' || needs.deploy-test.result == 'success') &&
       needs.resolve-commit.result == 'success'
     environment: Fabric-Production

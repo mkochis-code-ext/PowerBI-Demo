@@ -73,9 +73,17 @@ DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()
 NO_DEPLOY_TYPES = {
     "SQLAnalyticsEndpoint",  # auto-generated from Lakehouse; cannot be deployed
     "SQLEndpoint",           # variant name for the same auto-generated endpoint
+    "SQLDatabase",           # managed database; no source definition
     "Dashboard",             # service-only; no source definition
     "MountedWarehouse",
     "MountedDataFactory",
+}
+
+# Map of lower-cased item type to the definition format string the API
+# requires when uploading parts.  Types not listed here omit the format
+# field, letting the API use its default.
+FORMAT_BY_TYPE: dict[str, str] = {
+    "semanticmodel": "TMDL",
 }
 
 # The .platform file is Fabric Git-integration metadata only; the API does
@@ -231,19 +239,37 @@ def build_parts(item_dir: pathlib.Path) -> list[dict]:
 # Deploy operations
 # ---------------------------------------------------------------------------
 
+def _definition_body(
+    parts: list[dict],
+    item_type: str,
+) -> dict:
+    """Build the ``definition`` JSON body, including *format* when needed."""
+    defn: dict = {"parts": parts}
+    fmt = FORMAT_BY_TYPE.get(item_type.lower())
+    if fmt:
+        defn["format"] = fmt
+    return {"definition": defn}
+
+
 def update_item_definition(
     session: requests.Session,
     item_id: str,
     parts: list[dict],
+    item_type: str = "",
 ) -> None:
     # updateMetadata=true forces a full overwrite even when there are conflicts
     url  = f"{FABRIC_BASE}/workspaces/{TARGET_WORKSPACE_ID}/items/{item_id}/updateDefinition?updateMetadata=true"
-    body = {"definition": {"parts": parts}}
+    body = _definition_body(parts, item_type)
     resp = session.post(url, json=body, timeout=120)
 
     if resp.status_code == 400:
-        err = resp.json().get("errorCode", "")
-        raise ValueError(f"updateDefinition not supported for this item type (400 – {err})")
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = {"raw": resp.text[:500]}
+        code = err_body.get("errorCode", "")
+        msg  = err_body.get("message", err_body.get("raw", "unknown"))
+        raise ValueError(f"updateDefinition failed (400 – {code}): {msg}")
 
     handle_response(session, resp)
 
@@ -259,8 +285,8 @@ def create_item_with_definition(
     body = {
         "displayName": display_name,
         "type":        item_type,
-        "definition":  {"parts": parts},
     }
+    body.update(_definition_body(parts, item_type))
     resp   = session.post(url, json=body, timeout=120)
     result = handle_response(session, resp)
     return result.get("id", "")
@@ -633,7 +659,7 @@ def main():
         try:
             if existing_id:
                 print(f"    Updating existing item {existing_id} …")
-                update_item_definition(session, existing_id, parts)
+                update_item_definition(session, existing_id, parts, item_type)
                 print("    ✓ Updated")
                 results["deployed"] += 1
             else:
