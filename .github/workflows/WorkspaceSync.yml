@@ -23,9 +23,9 @@
 name: PowerBI Workspace Source Backup
 
 on:
-  # Run automatically every day at 02:00 UTC
+  # Run automatically every 4 hours
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 */4 * * *'
 
   # Allow manual execution from the GitHub Actions UI
   workflow_dispatch:

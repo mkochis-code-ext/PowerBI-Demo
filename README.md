@@ -1,293 +1,423 @@
-# Fabric Deployment Pipeline
+# Fabric CI/CD Automation
 
-This document describes the automated deployment pipeline for Microsoft Fabric workspaces using GitHub Actions and Fabric Deployment Pipelines.
+Automated backup, deployment, and promotion of Microsoft Fabric workspace artifacts using GitHub Actions. This repository provides **two independent deployment strategies** — choose the one that fits your workflow, or use both together.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Repository Structure](#repository-structure)
+- [GitHub Actions Workflows](#github-actions-workflows)
+  - [WorkspaceSync — Source Backup](#workspacesync--source-backup)
+  - [WorkspaceDeploy — REST API Deploy](#workspacedeploy--rest-api-deploy)
+  - [WorkspacePipelineDeploy — Fabric Deployment Pipeline](#workspacepipelinedeploy--fabric-deployment-pipeline)
+- [Python Scripts](#python-scripts)
+  - [sync_powerbi.py](#sync_powerbipy)
+  - [deploy_to_workspace.py](#deploy_to_workspacepy)
+- [Choosing a Deployment Strategy](#choosing-a-deployment-strategy)
+- [Setup & Configuration](#setup--configuration)
+  - [1. Create an Azure AD Service Principal](#1-create-an-azure-ad-service-principal)
+  - [2. Grant Fabric Permissions](#2-grant-fabric-permissions)
+  - [3. Configure GitHub Secrets](#3-configure-github-secrets)
+  - [4. Create GitHub Environments](#4-create-github-environments)
+  - [5. Fabric Deployment Pipeline Setup (WorkspacePipelineDeploy only)](#5-fabric-deployment-pipeline-setup-workspacepipelinedeploy-only)
+  - [6. Workflow Permissions](#6-workflow-permissions)
+- [Configuration Reference](#configuration-reference)
+- [Fabric REST API Endpoints Used](#fabric-rest-api-endpoints-used)
+- [Troubleshooting](#troubleshooting)
+
+---
 
 ## Overview
 
-This pipeline automates the promotion of Fabric artifacts from Development through Test to Production environments using a Git-based workflow. The pipeline ensures that all changes are version-controlled, validated, and systematically deployed across environments with appropriate approvals.
+The automation in this repository covers three scenarios:
 
-## Architecture
+| Workflow | Purpose | Trigger |
+|----------|---------|---------|
+| **WorkspaceSync** | Download every artifact from a Fabric workspace into the `fabric/` directory and commit to `main` | Scheduled (daily) or manual |
+| **WorkspaceDeploy** | Push the `fabric/` directory contents to a target workspace via the Fabric REST API (create / update / delete items) | Manual — choose branch, environment, and optional single-item deploy |
+| **WorkspacePipelineDeploy** | Promote artifacts through a **Fabric Deployment Pipeline** (Dev → Test → Prod) using the built-in Deployment Pipelines API | Manual |
 
-### Git Integration
-- **Development Workspace (`GIT-DEV`)**: The only workspace connected to Git. All development changes are committed and synchronized through this workspace.
-- **Test Workspace**: Updated via Fabric Deployment Pipeline (not directly connected to Git)
-- **Production Workspace**: Updated via Fabric Deployment Pipeline (not directly connected to Git)
+The `fabric/` folder in this repository contains example Fabric artifacts (Notebooks, Semantic Models, a Lakehouse, a SQL Database, and an Environment). These are provided as sample content and are managed automatically by the sync and deploy pipelines.
 
-### Deployment Flow
+---
+
+## Repository Structure
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Developer Workflow (Git)                                       │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Create Feature Branch                                       │
-│  2. Make Changes in Fabric Workspace                            │
-│  3. Commit to Feature Branch                                    │
-│  4. Create Pull Request                                         │
-│  5. Merge to Main Branch                                        │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-                    [Triggers GitHub Actions]
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 1: Development                                           │
-│  ───────────────────────────────────────────────────────────    │
-│  ✓ Sync GIT-DEV workspace with main branch                     │
-│  ✓ Validate no uncommitted changes                             │
-│  ✓ Resolve Fabric Pipeline IDs                                 │
-│                                                                 │
-│  [Requires: Fabric-Development approval]                        │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-                     [Fabric Deployment API]
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 2: Test                                                  │
-│  ───────────────────────────────────────────────────────────    │
-│  ✓ Deploy Development → Test                                   │
-│  ✓ Poll deployment status until complete                       │
-│                                                                 │
-│  [Requires: Fabric-Test approval]                               │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-                     [Fabric Deployment API]
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 3: Production                                            │
-│  ───────────────────────────────────────────────────────────    │
-│  ✓ Deploy Test → Production                                    │
-│  ✓ Poll deployment status until complete                       │
-│                                                                 │
-│  [Requires: Fabric-Production approval]                         │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-                        ✅ COMPLETE
+.github/
+  scripts/
+    sync_powerbi.py          # Downloads workspace items to fabric/
+    deploy_to_workspace.py   # Deploys fabric/ items to a target workspace
+    requirements.txt         # Python dependency (requests)
+  workflows/
+    WorkspaceSync.yml         # Backup workflow
+    WorkspaceDeploy.yml       # REST API deploy workflow
+    WorkspacePipelineDeploy.yml  # Fabric Deployment Pipeline workflow
+fabric/                       # Artifact source files (auto-managed by sync)
 ```
 
-## Development Workflow
+---
 
-### 1. Create a Feature Branch
-Developers create a new Git branch to work on their changes:
+## GitHub Actions Workflows
 
-```bash
-git checkout -b feature/my-new-feature
-```
+### WorkspaceSync — Source Backup
 
-### 2. Work in a Development Workspace
-- Create or use a Fabric workspace for development
-- Connect the workspace to your feature branch in Git
-- Make changes to Fabric artifacts (notebooks, semantic models, reports, etc.)
-- Test your changes in the development workspace
+**File:** `.github/workflows/WorkspaceSync.yml`
 
-### 3. Commit Changes to Git
-From within the Fabric workspace:
-- Commit your changes to the feature branch
-- Add meaningful commit messages describing the changes
-- Ensure all artifacts are properly committed
+Downloads the source definition of every item in a Fabric workspace and commits the files to `main`. This gives you a full version-controlled backup of your workspace.
 
-### 4. Create a Pull Request
-In GitHub:
-- Create a pull request from your feature branch to `main`
-- Add reviewers to review your changes
-- Address any review comments
-- Ensure all required checks pass
+| Setting | Value |
+|---------|-------|
+| **Trigger** | Scheduled daily at 02:00 UTC, or manual `workflow_dispatch` |
+| **Manual input** | Optional `workspace_id_override` to sync a different workspace without changing secrets |
+| **Runs on** | `ubuntu-latest`, Python 3.12 |
+| **Permissions** | `contents: write` (pushes commits via `GITHUB_TOKEN`) |
 
-### 5. Merge to Main
-Once approved:
-- Merge the pull request to the `main` branch
-- This automatically triggers the deployment pipeline
+**What it does:**
 
-## Automated Deployment Pipeline
+1. Checks out `main`.
+2. Runs `sync_powerbi.py`, which authenticates as a service principal, lists all workspace items, and calls `getDefinition` on each one.
+3. Decoded source files are written to `fabric/<ItemName>.<ItemType>/`.
+4. A `workspace_manifest.json` is generated with metadata about the sync.
+5. Changes are staged, committed, and pushed to `main` with `--force-with-lease`.
 
-### Stage 1: Development (Automatic)
-**Trigger**: Push to `main` branch or manual workflow dispatch
+If there are no changes the workflow exits cleanly without creating a commit.
 
-**Actions**:
-1. Syncs the `GIT-DEV` workspace with the latest code from the `main` branch
-2. Validates that the workspace has no uncommitted changes
-3. Ensures the workspace is in sync with Git before proceeding
-4. Resolves Fabric Deployment Pipeline and Stage IDs
+---
 
-**Validation**:
-- Git connection status check
-- Git credentials configuration (for service principal)
-- Workspace sync verification
-- Pending changes detection (fails if uncommitted changes exist)
+### WorkspaceDeploy — REST API Deploy
 
-**Approval**: Requires `Fabric-Development` environment approval (configured in GitHub)
+**File:** `.github/workflows/WorkspaceDeploy.yml`
 
-### Stage 2: Test (Approval Required)
-**Trigger**: Successful completion of Development stage + environment approval
+Deploys artifact definitions from the `fabric/` directory directly to one or more target Fabric workspaces using the Fabric REST API. This workflow does **not** use Fabric Deployment Pipelines — it creates, updates, and deletes items directly.
 
-**Actions**:
-1. Deploys artifacts from Development stage to Test stage using Fabric Deployment Pipeline API
-2. Polls deployment status until completion
-3. Validates successful deployment
+| Setting | Value |
+|---------|-------|
+| **Trigger** | Manual `workflow_dispatch` only |
+| **Permissions** | `contents: read` |
 
-**Approval**: Requires `Fabric-Test` environment approval (configured in GitHub)
+**Manual inputs:**
 
-**Note**: If there are no changes between Development and Test, the deployment is skipped with a warning.
+| Input | Description | Default |
+|-------|-------------|---------|
+| `branch` | Branch to deploy content from | `dev` |
+| `environment` | Which environment(s) to target | `both` (options: `both`, `test-only`, `prod-only`) |
+| `item` | Optional single-item deploy (e.g. `Add Calculated Measure.Notebook`). Leave blank for a full workspace deploy. | *(empty)* |
 
-### Stage 3: Production (Approval Required)
-**Trigger**: Successful completion of Test stage + environment approval
+**How it works:**
 
-**Actions**:
-1. Deploys artifacts from Test stage to Production stage using Fabric Deployment Pipeline API
-2. Polls deployment status until completion
-3. Validates successful deployment
+1. **resolve-commit** — Resolves the HEAD SHA of the selected branch so both deploy jobs use the same ref.
+2. **deploy-test** — Checks out `main` for pipeline scripts, then overlays the `fabric/` directory from the target branch. Runs `deploy_to_workspace.py` against the **TEST** workspace. Gated behind the `Fabric-Test` environment.
+3. **deploy-prod** — Same process targeting the **PROD** workspace, gated behind `Fabric-Production`. Runs after test succeeds (or independently if `prod-only` is selected).
 
-**Approval**: Requires `Fabric-Production` environment approval (configured in GitHub)
+**Full deploy** (default, no `item` input): The target workspace is made to exactly mirror the repo — new items are created, existing items are updated, and items in the workspace that are not in the repo are deleted.
 
-**Note**: If there are no changes between Test and Production, the deployment is skipped with a warning.
+**Selective deploy** (`item` input set): Only the named item and its transitive dependencies are deployed. Nothing is deleted.
 
-## Prerequisites
+---
 
-### GitHub Secrets Configuration
-The following secrets must be configured in your GitHub repository:
+### WorkspacePipelineDeploy — Fabric Deployment Pipeline
 
-**Azure Service Principal Authentication**:
-- `AZURE_CLIENT_ID`: Service principal application (client) ID
-- `AZURE_CLIENT_SECRET`: Service principal client secret
-- `AZURE_TENANT_ID`: Azure Active Directory tenant ID
-- `AZURE_SUBSCRIPTION_ID`: Azure subscription ID
+**File:** `.github/workflows/WorkspacePipelineDeploy.yml`
 
-**Fabric Git Integration**:
-- `FABRIC_GIT_CONNECTION_ID`: Pre-configured Git connection ID (recommended for service principals)
+Promotes artifacts through a Fabric Deployment Pipeline using the native Deployment Pipelines API. This assumes you already have a configured Deployment Pipeline in Fabric with workspaces assigned to each stage.
 
-### GitHub Environments
-Create the following environments in GitHub (Settings → Environments):
-- `Fabric-Development`: Configure required reviewers for Development approval
-- `Fabric-Test`: Configure required reviewers for Test approval
-- `Fabric-Production`: Configure required reviewers for Production approval
+| Setting | Value |
+|---------|-------|
+| **Trigger** | Manual `workflow_dispatch` only |
+| **Permissions** | `contents: read` |
 
-### Service Principal Setup
-The service principal must be granted proper permissions in Fabric:
+**Jobs:**
 
-**Step 1: Add Service Principal to Workspaces**
-- Navigate to each workspace (Development, Test, Production) in Fabric
-- Go to Workspace Settings → Manage Access
-- Add the service principal as an **Admin**
-- Repeat for all three workspaces
+1. **Promote to Test** — Logs in with a service principal via `azure/login`, discovers the pipeline and stage IDs by name, then triggers a deployment from the Development stage to the Test stage. Polls for completion. Gated behind `Fabric-Test`.
+2. **Promote to Production** — After Test succeeds, triggers a deployment from Test to Production. Polls for completion. Gated behind `Fabric-Production`.
 
-**Step 2: Add Service Principal to Deployment Pipeline**
-- Navigate to the Fabric Deployment Pipeline in Fabric
-- Go to Pipeline Settings → Manage Access
-- Add the service principal as an **Admin**
-- This allows the pipeline to trigger deployments between stages
+If the source and target stages are already in sync the workflow emits a warning and succeeds without error.
 
-**Step 3: Azure Subscription Permissions**
-- Ensure the service principal has the ability to acquire access tokens for the Fabric API resource (`https://api.fabric.microsoft.com`)
+**Configurable environment variables** (set in the workflow file):
 
-### Fabric Configuration
-1. **Create Fabric Deployment Pipeline**: Named `Git Deployment` (or update `FABRIC_PIPELINE_NAME` in workflow)
-2. **Configure Stages**: Three stages named exactly:
-   - `Development`
-   - `Test`
-   - `Production`
-3. **Assign Workspaces**: Assign the appropriate workspace to each stage
-4. **Git Connection**: Connect only the Development workspace (`GIT-DEV`) to your GitHub repository
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FABRIC_PIPELINE_NAME` | `PowerBI Deployment` | Display name of the Fabric Deployment Pipeline |
+| `DEV_WORKSPACE_NAME` | `PowerBI-DEV` | Development workspace name (used for lookup) |
+| `DEV_STAGE_NAME` | `Development` | Stage name in the Fabric pipeline |
+| `TEST_STAGE_NAME` | `Test` | Stage name in the Fabric pipeline |
+| `PROD_STAGE_NAME` | `Production` | Stage name in the Fabric pipeline |
+| `DEBUG` | `1` | Set to `1` for verbose logging |
 
-## Key Features
+---
 
-### Git Validation
-- Ensures the Development workspace is synchronized with Git before deployment
-- Fails the pipeline if there are uncommitted changes in the workspace
-- Prevents out-of-sync deployments
+## Python Scripts
 
-### Long Polling
-- Test and Production stages poll deployment status until completion
-- Prevents premature progression to next stage
-- Provides real-time deployment status updates
+### sync_powerbi.py
 
-### Error Handling
-- Graceful handling of "no changes to deploy" scenarios
-- Detailed error messages for troubleshooting
-- Git credentials configuration with fallback options
+**File:** `.github/scripts/sync_powerbi.py`
 
-### Debug Mode
-Set `DEBUG: '1'` in the workflow file to enable verbose logging for troubleshooting.
+Authenticates as a service principal and downloads source definitions for every item in a Fabric workspace.
 
-## Monitoring and Troubleshooting
+**Supported item types** (anything that exposes `getDefinition`):
 
-### GitHub Actions UI
-- Navigate to Actions tab in GitHub repository
-- View workflow runs, logs, and approval status
-- Monitor deployment progress in real-time
+| Item Type | Files Saved |
+|-----------|-------------|
+| Notebook | `notebook-content.py` + `.platform` |
+| SemanticModel | `model.bim` or `*.tmdl` tree + `.platform` |
+| Report | `definition.pbir` + `report.json` + … + `.platform` |
+| Lakehouse | `lakehouse.metadata.json` + `.platform` |
+| DataPipeline | `pipeline-content.json` + `.platform` |
+| SQLDatabase | `SqlDatabase.json` + `.platform` |
+| Environment | `environment.yml` + `.platform` |
+| … and more | Any type exposing `getDefinition` |
 
-### Common Issues
+**Skipped types** (no downloadable definition): `SQLAnalyticsEndpoint`, `SQLEndpoint`, `Dashboard`, `MountedWarehouse`, `MountedDataFactory`.
 
-**Git Credentials Not Configured**:
-- Ensure `FABRIC_GIT_CONNECTION_ID` secret is set with valid connection ID
-- Verify service principal has proper workspace permissions
-- Check Git connection exists in Fabric workspace settings
+**Key behaviors:**
+- Handles long-running operations (202 responses) with polling (5 s interval, 6 min max).
+- Output directory structure mirrors Fabric Git integration: `fabric/<DisplayName>.<ItemType>/`.
+- Writes a `workspace_manifest.json` with a full inventory and sync timestamp.
 
-**Deployment Fails**:
-- Review deployment pipeline configuration in Fabric
-- Verify workspace assignments to pipeline stages
-- Check service principal permissions on target workspaces
+**Required environment variables:**
 
-**No Items to Deploy**:
-- This is expected when stages are already in sync
-- Pipeline continues with warning message
+| Variable | Description |
+|----------|-------------|
+| `TENANT_ID` | Azure AD tenant ID |
+| `CLIENT_ID` | Service principal application (client) ID |
+| `CLIENT_SECRET` | Service principal client secret |
+| `WORKSPACE_ID` | Fabric workspace ID to sync |
 
-## Best Practices
+---
 
-1. **Always work in feature branches**: Never commit directly to `main`
-2. **Test thoroughly before merging**: Validate changes in your development workspace
-3. **Use meaningful commit messages**: Helps track changes across environments
-4. **Review pull requests carefully**: Ensure changes are reviewed before deployment
-5. **Monitor deployment logs**: Check GitHub Actions logs for any warnings or errors
-6. **Keep workspaces in sync**: Ensure Development workspace commits all changes regularly
+### deploy_to_workspace.py
 
-## Pipeline Maintenance
+**File:** `.github/scripts/deploy_to_workspace.py`
 
-### Updating Configuration
-Key configuration values are defined in the `env` section of the workflow file:
-- `FABRIC_PIPELINE_NAME`: Name of your Fabric Deployment Pipeline
-- `DEV_WORKSPACE_NAME`: Name of your Development workspace
-- `DEV_STAGE_NAME`, `TEST_STAGE_NAME`, `PROD_STAGE_NAME`: Stage names in Fabric pipeline
+Reads the `fabric/` directory and pushes item definitions to a target workspace.
 
-### Modifying Approval Flow
-Edit environment protection rules in GitHub Settings → Environments to change:
-- Required reviewers
-- Wait timer before deployment
-- Environment secrets
+**Two modes of operation:**
 
-## Fabric REST API Endpoints
+| Mode | Behavior |
+|------|----------|
+| **Full deploy** (`DEPLOY_ITEM` not set) | Creates missing items, updates existing items, **deletes** workspace items not present in the repo |
+| **Selective deploy** (`DEPLOY_ITEM` set) | Deploys only the named item and its transitive dependencies. Nothing is deleted. |
 
-This pipeline uses the following Microsoft Fabric REST API endpoints. All endpoints are called using the base URL `https://api.fabric.microsoft.com`.
+**Dependency resolution:**
 
-### Workspace APIs
+The script automatically discovers cross-item dependencies so they are deployed in the correct order:
 
-| Endpoint | Method | Purpose | Documentation |
-|----------|--------|---------|---------------|
-| `/v1/workspaces` | GET | List all workspaces to resolve workspace ID by name | [List Workspaces](https://learn.microsoft.com/en-us/rest/api/fabric/core/workspaces/list-workspaces) |
+| Source Item | How Dependencies Are Found |
+|-------------|---------------------------|
+| **Notebook** | Parses `# META` JSON blocks for lakehouse and environment references |
+| **SemanticModel** | Scans `.tmdl` files for `Sql.Database()` calls → Lakehouse dependencies |
+| **Report** | Reads `.pbir` files for `datasetReference.byPath.datasetName` → SemanticModel dependencies |
 
-### Git Integration APIs
+Dependencies are resolved transitively and deployed in topological order (dependencies first).
 
-| Endpoint | Method | Purpose | Documentation |
-|----------|--------|---------|---------------|
-| `/v1/workspaces/{workspaceId}/git/connection` | GET | Get Git connection details for a workspace | [Get Git Connection](https://learn.microsoft.com/en-us/rest/api/fabric/core/git/get-connection) |
-| `/v1/workspaces/{workspaceId}/git/myGitCredentials` | GET | Get current Git credentials configuration | [Get Git Credentials](https://learn.microsoft.com/en-us/rest/api/fabric/core/git/get-git-credentials) |
-| `/v1/workspaces/{workspaceId}/git/myGitCredentials` | PUT | Configure Git credentials for service principal access | [Update Git Credentials](https://learn.microsoft.com/en-us/rest/api/fabric/core/git/update-git-credentials) |
-| `/v1/workspaces/{workspaceId}/git/status` | GET | Get Git sync status and pending changes | [Get Git Status](https://learn.microsoft.com/en-us/rest/api/fabric/core/git/get-status) |
-| `/v1/workspaces/{workspaceId}/git/updateFromGit` | POST | Sync workspace with Git repository (pull changes) | [Update From Git](https://learn.microsoft.com/en-us/rest/api/fabric/core/git/update-from-git) |
+**Item handling by type:**
+
+| Category | Types | Behavior |
+|----------|-------|----------|
+| **Normal** | Notebook, SemanticModel, Report, DataPipeline, etc. | Full create/update via definition API |
+| **Metadata-only** | Lakehouse, Environment, SQLDatabase, Warehouse | Created with name + type only (no definition upload). If the item already exists it is left as-is. |
+| **Skipped** | SQLAnalyticsEndpoint, SQLEndpoint, Dashboard, MountedWarehouse, MountedDataFactory | Cannot be deployed; skipped automatically |
+
+**SemanticModel format:** Definitions are uploaded in `TMDL` format (configured via `FORMAT_BY_TYPE`).
+
+**`.platform` files** are excluded from the parts list sent to the API.
+
+**Required environment variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `TENANT_ID` | Azure AD tenant ID |
+| `CLIENT_ID` | Service principal application (client) ID |
+| `CLIENT_SECRET` | Service principal client secret |
+| `TARGET_WORKSPACE_ID` | Fabric workspace ID to deploy into |
+| `DEPLOY_ITEM` | *(Optional)* Folder name for selective deploy (e.g. `Add Calculated Measure.Notebook`) |
+
+---
+
+## Choosing a Deployment Strategy
+
+This repo offers two ways to move artifacts between environments. You can use one or both.
+
+| | WorkspaceDeploy (REST API) | WorkspacePipelineDeploy (Fabric Pipeline) |
+|-|---------------------------|------------------------------------------|
+| **Mechanism** | Reads files from Git, pushes definitions directly to target workspace | Uses Fabric's built-in Deployment Pipelines API to promote between stages |
+| **Branch support** | Deploy from any branch (`dev`, feature branches, etc.) | N/A — operates on workspaces already assigned to pipeline stages |
+| **Selective deploy** | Yes — deploy a single item + dependencies | No — promotes all artifacts in the stage |
+| **Deletes stale items** | Yes (full deploy mode) | No — Fabric pipelines only add/update |
+| **Requires Fabric Deployment Pipeline** | No | Yes |
+| **Best for** | Git-driven workflows, branch-based promotion, fine-grained control | Organizations already using Fabric Deployment Pipelines |
+
+**Recommended workflow:**
+
+1. Use **WorkspaceSync** on a schedule to keep `main` backed up with the latest workspace state.
+2. Create feature branches from `main`, make changes, and merge via pull request.
+3. Use **WorkspaceDeploy** to push branch content to Test and Production workspaces.
+
+Alternatively, if your team prefers Fabric's built-in promotion model, use **WorkspacePipelineDeploy** to push changes through the Fabric Deployment Pipeline stages after syncing the development workspace.
+
+---
+
+## Setup & Configuration
+
+### 1. Create an Azure AD Service Principal
+
+Register an application in Azure AD (Microsoft Entra ID):
+
+1. Go to **Azure Portal → Microsoft Entra ID → App registrations → New registration**.
+2. Give it a name (e.g. `Fabric-CI-CD`), select **Single tenant**, and register.
+3. Note the **Application (client) ID** and **Directory (tenant) ID**.
+4. Under **Certificates & secrets → Client secrets**, create a new secret and copy the value immediately.
+5. Note your **Azure Subscription ID** (needed for the WorkspacePipelineDeploy workflow).
+
+### 2. Grant Fabric Permissions
+
+The service principal needs access to your Fabric workspaces:
+
+**a) Enable Service Principal access in Fabric:**
+
+1. Go to the **Fabric Admin Portal → Tenant settings**.
+2. Under **Developer settings**, enable **Service principals can use Fabric APIs**.
+3. Add the service principal (or a security group containing it) to the allowed list.
+
+**b) Add the Service Principal to each workspace:**
+
+For every workspace the automation touches (Dev, Test, Production):
+
+1. Open the workspace in Fabric.
+2. Go to **Manage access** (the people icon).
+3. Click **Add people or groups** and search for your service principal by name.
+4. Assign the **Admin** role.
+
+**c) Add the Service Principal to the Deployment Pipeline** (WorkspacePipelineDeploy only):
+
+1. Open the Fabric Deployment Pipeline.
+2. Go to pipeline settings and add the service principal as an **Admin**.
+
+### 3. Configure GitHub Secrets
+
+Go to **GitHub → Repository → Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Secret | Used By | Description |
+|--------|---------|-------------|
+| `POWERBI_TENANT_ID` | All workflows | Azure AD tenant ID |
+| `POWERBI_CLIENT_ID` | All workflows | Service principal application (client) ID |
+| `POWERBI_CLIENT_SECRET` | All workflows | Service principal client secret value |
+| `POWERBI_WORKSPACE_ID` | WorkspaceSync | Source workspace ID for backup |
+| `POWERBI_TEST_WORKSPACE_ID` | WorkspaceDeploy | Target workspace ID for Test environment |
+| `POWERBI_PROD_WORKSPACE_ID` | WorkspaceDeploy | Target workspace ID for Production environment |
+| `POWERBI_SUBSCRIPTION_ID` | WorkspacePipelineDeploy | Azure subscription ID (used by `azure/login`) |
+
+> **Finding workspace IDs:** Open a workspace in Fabric. The URL contains the workspace ID: `https://app.fabric.microsoft.com/groups/<workspace-id>/...`
+
+### 4. Create GitHub Environments
+
+Go to **GitHub → Repository → Settings → Environments** and create:
+
+| Environment | Purpose | Recommended Protection |
+|-------------|---------|----------------------|
+| `Fabric-Test` | Gates deployment to the Test workspace | Required reviewers |
+| `Fabric-Production` | Gates deployment to the Production workspace | Required reviewers, wait timer |
+
+Environment protection rules control who can approve deployments and add optional wait timers before deployment begins.
+
+### 5. Fabric Deployment Pipeline Setup (WorkspacePipelineDeploy only)
+
+If using the Fabric Deployment Pipeline workflow:
+
+1. In Fabric, create a Deployment Pipeline named **`PowerBI Deployment`** (or update `FABRIC_PIPELINE_NAME` in the workflow).
+2. Configure three stages named exactly: **`Development`**, **`Test`**, **`Production`**.
+3. Assign the appropriate workspace to each stage.
+4. Ensure the service principal has Admin access to the pipeline.
+
+### 6. Workflow Permissions
+
+For **WorkspaceSync** (which pushes commits):
+
+1. Go to **GitHub → Repository → Settings → Actions → General**.
+2. Under **Workflow permissions**, select **Read and write permissions**.
+3. This allows the `GITHUB_TOKEN` to push commits to `main`.
+
+---
+
+## Configuration Reference
+
+### WorkspaceDeploy Environment Variables
+
+These are set in the workflow YAML and typically don't need to change:
+
+| Variable | Location | Default |
+|----------|----------|---------|
+| `PYTHON_VERSION` | Workflow env | `3.12` |
+
+### WorkspacePipelineDeploy Environment Variables
+
+| Variable | Location | Default | Description |
+|----------|----------|---------|-------------|
+| `FABRIC_PIPELINE_NAME` | Workflow env | `PowerBI Deployment` | Must match the exact display name of your Fabric Deployment Pipeline |
+| `DEV_WORKSPACE_NAME` | Workflow env | `PowerBI-DEV` | Used for lookup if `DEV_WORKSPACE_ID` is empty |
+| `DEV_STAGE_NAME` | Workflow env | `Development` | Must match the stage name in your pipeline |
+| `TEST_STAGE_NAME` | Workflow env | `Test` | Must match the stage name in your pipeline |
+| `PROD_STAGE_NAME` | Workflow env | `Production` | Must match the stage name in your pipeline |
+| `DEBUG` | Workflow env | `1` | Set to `1` for verbose logging, `0` to disable |
+
+### deploy_to_workspace.py Constants
+
+These are set in the Python source and can be adjusted:
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `POLL_INTERVAL` | `5` seconds | Time between polling attempts for long-running operations |
+| `POLL_MAX` | `72` | Maximum polling attempts (72 × 5 s = 6 min) |
+| `FORMAT_BY_TYPE` | `{"semanticmodel": "TMDL"}` | Definition format per item type |
+| `METADATA_ONLY_TYPES` | Lakehouse, Environment, SQLDatabase, Warehouse | Types created without definition upload |
+| `EXCLUDED_FILES` | `.platform` | Files excluded from the parts list sent to the API |
+
+---
+
+## Fabric REST API Endpoints Used
+
+All endpoints use the base URL `https://api.fabric.microsoft.com`.
+
+### Workspace & Item APIs
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/v1/workspaces/{workspaceId}/items` | GET | List all items in a workspace |
+| `/v1/workspaces/{workspaceId}/items/{itemId}/getDefinition` | POST | Download item source definition |
+| `/v1/workspaces/{workspaceId}/items` | POST | Create a new item (with or without definition) |
+| `/v1/workspaces/{workspaceId}/items/{itemId}/updateDefinition` | POST | Update an existing item's definition |
+| `/v1/workspaces/{workspaceId}/items/{itemId}` | DELETE | Delete an item from the workspace |
 
 ### Deployment Pipeline APIs
 
-| Endpoint | Method | Purpose | Documentation |
-|----------|--------|---------|---------------|
-| `/v1/deploymentPipelines` | GET | List all deployment pipelines to resolve pipeline ID | [List Deployment Pipelines](https://learn.microsoft.com/en-us/rest/api/fabric/core/deployment-pipelines/list-deployment-pipelines) |
-| `/v1/deploymentPipelines/{pipelineId}/stages` | GET | List stages in a deployment pipeline | [List Deployment Pipeline Stages](https://learn.microsoft.com/en-us/rest/api/fabric/core/deployment-pipelines/list-deployment-pipeline-stages) |
-| `/v1/deploymentPipelines/{pipelineId}/deploy` | POST | Deploy artifacts from source stage to target stage | [Deploy Stage Content](https://learn.microsoft.com/en-us/rest/api/fabric/core/deployment-pipelines/deploy-stage-content) |
-| `{Location header URL}` | GET | Poll long-running deployment operation status | [Long Running Operations](https://learn.microsoft.com/en-us/rest/api/fabric/core/long-running-operations) |
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/v1/deploymentPipelines` | GET | List all deployment pipelines |
+| `/v1/deploymentPipelines/{pipelineId}/stages` | GET | List stages in a pipeline |
+| `/v1/deploymentPipelines/{pipelineId}/deploy` | POST | Trigger a stage-to-stage deployment |
 
-### API Authentication
+### Operations API
 
-All API calls use Azure AD bearer token authentication:
-```powershell
-$token = az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/v1/operations/{operationId}` | GET | Poll a long-running operation status |
+| `/v1/operations/{operationId}/result` | GET | Retrieve the result of a completed operation |
+
+### Authentication
+
+**Python scripts** use OAuth 2.0 client credentials flow directly:
+
+```
+POST https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token
+Scope: https://api.fabric.microsoft.com/.default
 ```
 
-The service principal must have appropriate permissions on workspaces and deployment pipelines as described in the [Service Principal Setup](#service-principal-setup) section.
+**WorkspacePipelineDeploy** uses the Azure CLI via `azure/login`:
+
+```shell
+az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv
+```
 
 ### Additional Resources
 
@@ -295,10 +425,18 @@ The service principal must have appropriate permissions on workspaces and deploy
 - [Fabric Git Integration](https://learn.microsoft.com/en-us/fabric/cicd/git-integration/intro-to-git-integration)
 - [Fabric Deployment Pipelines](https://learn.microsoft.com/en-us/fabric/cicd/deployment-pipelines/intro-to-deployment-pipelines)
 
-## Support
+---
 
-For issues or questions:
-1. Review GitHub Actions workflow logs
-2. Check Fabric workspace and deployment pipeline status
-3. Verify all prerequisites are configured correctly
-4. Consult Fabric API documentation for API-related issues
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `No access_token in authentication response` | Incorrect client ID, secret, or tenant ID | Verify `POWERBI_CLIENT_ID`, `POWERBI_CLIENT_SECRET`, and `POWERBI_TENANT_ID` secrets |
+| `getDefinition` returns 400/404 for an item | Item type does not support definition download | Expected for auto-generated types (SQL endpoints, etc.) — the script skips these gracefully |
+| `Pipeline 'PowerBI Deployment' not found` | Pipeline name mismatch | Ensure `FABRIC_PIPELINE_NAME` in the workflow matches the exact name in Fabric |
+| `Could not resolve source/target stage IDs` | Stage name mismatch | Ensure `DEV_STAGE_NAME`, `TEST_STAGE_NAME`, `PROD_STAGE_NAME` match the exact stage names in your Fabric pipeline |
+| `NoItemsToDeploy` warning | Source and target stages are already in sync | Not an error — the workflow succeeds with a warning |
+| `updateDefinition failed (400)` | Item definition is invalid or the type doesn't support update | Check the item type; metadata-only types (Lakehouse, Environment) cannot be updated via definition API |
+| WorkspaceSync commit push fails | `GITHUB_TOKEN` lacks write permission | Go to **Settings → Actions → General → Workflow permissions** and enable **Read and write** |
+| Selective deploy can't find item | Folder name doesn't match | Use the exact folder name including the type suffix (e.g. `Add Calculated Measure.Notebook`) |
+| LRO polling timeout | Operation took longer than 6 minutes | Increase `POLL_MAX` in the Python script |

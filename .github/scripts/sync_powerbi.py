@@ -102,10 +102,23 @@ def get_access_token(scope: str) -> str:
     return token
 
 
-def write_file(path: pathlib.Path, data: bytes) -> None:
+def write_file(path: pathlib.Path, data: bytes) -> bool:
+    """Write *data* to *path* only if the content has actually changed.
+
+    Returns True if the file was written (new or changed), False if skipped.
+    """
+    if path.exists():
+        existing = path.read_bytes()
+        if existing == data:
+            print(f"      SKIP  {path}  (unchanged)")
+            return False
+        print(f"      WRITE {path}  (content changed)")
+    else:
+        print(f"      WRITE {path}  (new file)")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
-    print(f"      Saved {path}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +212,11 @@ def _poll_lro(session: requests.Session, operation_id: str) -> dict | None:
 # Save definition parts
 # ---------------------------------------------------------------------------
 
-def save_definition(item_name: str, item_type: str, definition: dict) -> None:
+def save_definition(item_name: str, item_type: str, definition: dict) -> tuple[int, int]:
     """
     Decode every part in the definition and write it to disk.
+
+    Returns (written_count, skipped_count) so the caller can track totals.
 
     Directory layout mirrors the Fabric GitHub integration exactly:
 
@@ -219,7 +234,10 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> None:
     parts = definition.get("parts", [])
     if not parts:
         print("      WARNING: definition contained no parts.")
-        return
+        return (0, 0)
+
+    written = 0
+    skipped = 0
 
     # <DisplayName>.<ItemType>  –  matches Fabric Git integration folder naming
     item_dir = OUTPUT_ROOT / f"{sanitize(item_name)}.{item_type}"
@@ -233,7 +251,12 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> None:
         else:
             raw = payload.encode("utf-8") if isinstance(payload, str) else payload
 
-        write_file(item_dir / rel_path, raw)
+        if write_file(item_dir / rel_path, raw):
+            written += 1
+        else:
+            skipped += 1
+
+    return (written, skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +318,10 @@ def main():
     # ── 3. Download source definitions ─────────────────────────────────────────────
     print("\n[3/3] Downloading source definitions …")
     skipped: list = []
+    total_files_written  = 0
+    total_files_unchanged = 0
+    items_with_changes   = 0
+    items_unchanged      = 0
 
     for item in items:
         item_id   = item["id"]
@@ -314,7 +341,15 @@ def main():
                 print("    SKIP – getDefinition not supported or returned nothing")
                 skipped.append({**item, "skipReason": "getDefinition returned nothing"})
             else:
-                save_definition(item_name, item_type, definition)
+                written, unchanged = save_definition(item_name, item_type, definition)
+                total_files_written  += written
+                total_files_unchanged += unchanged
+                if written > 0:
+                    items_with_changes += 1
+                    print(f"    ✓ {written} file(s) written, {unchanged} unchanged")
+                else:
+                    items_unchanged += 1
+                    print(f"    — No changes detected ({unchanged} file(s) identical)")
         except Exception as exc:
             print(f"    ERROR – {exc}")
             skipped.append({**item, "skipReason": str(exc)})
@@ -322,8 +357,12 @@ def main():
     write_manifest(items, skipped)
 
     total_saved = len(items) - len(skipped)
-    print(f"\n  Saved  : {total_saved} item(s)")
-    print(f"  Skipped: {len(skipped)} item(s)")
+    print(f"\n  Items processed : {total_saved}")
+    print(f"  Items changed   : {items_with_changes}")
+    print(f"  Items unchanged : {items_unchanged}")
+    print(f"  Items skipped   : {len(skipped)}")
+    print(f"  Files written   : {total_files_written}")
+    print(f"  Files unchanged : {total_files_unchanged}")
     print("\n=== Backup complete ===")
 
 
