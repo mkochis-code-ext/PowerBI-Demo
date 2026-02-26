@@ -41,6 +41,8 @@ import time
 import base64
 import pathlib
 import re
+import zipfile
+import io
 import requests
 
 # ---------------------------------------------------------------------------
@@ -102,14 +104,52 @@ def get_access_token(scope: str) -> str:
     return token
 
 
+# File extensions that are ZIP archives whose raw bytes may differ between
+# exports even when the logical content is identical (embedded timestamps,
+# compression metadata, etc.).  For these we compare the *member contents*
+# inside the archive rather than the outer bytes.
+ZIP_EXTENSIONS = {".dacpac", ".bacpac", ".nupkg"}
+
+
+def _zip_contents_equal(a: bytes, b: bytes) -> bool:
+    """Return True if two ZIP archives contain identical member files.
+
+    Compares only the central-directory metadata (file names, CRC-32
+    checksums, and uncompressed sizes) without decompressing any data.
+    This is very fast because the ZIP central directory is a small
+    structure at the tail of the archive that ``zipfile`` reads on open.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(a)) as za, zipfile.ZipFile(io.BytesIO(b)) as zb:
+            entries_a = sorted(
+                (i.filename, i.CRC, i.file_size) for i in za.infolist()
+            )
+            entries_b = sorted(
+                (i.filename, i.CRC, i.file_size) for i in zb.infolist()
+            )
+            return entries_a == entries_b
+    except (zipfile.BadZipFile, Exception):
+        # If either isn't a valid ZIP, fall back to raw comparison
+        return a == b
+
+
 def write_file(path: pathlib.Path, data: bytes) -> bool:
     """Write *data* to *path* only if the content has actually changed.
+
+    For ZIP-based formats (.dacpac, etc.) the comparison is done on the
+    archive member contents rather than the raw bytes, because Fabric
+    regenerates the ZIP envelope on every export.
 
     Returns True if the file was written (new or changed), False if skipped.
     """
     if path.exists():
         existing = path.read_bytes()
-        if existing == data:
+        is_zip = path.suffix.lower() in ZIP_EXTENSIONS
+        contents_match = (
+            _zip_contents_equal(existing, data) if is_zip
+            else existing == data
+        )
+        if contents_match:
             print(f"      SKIP  {path}  (unchanged)")
             return False
         print(f"      WRITE {path}  (content changed)")
