@@ -259,6 +259,10 @@ def _definition_body(
     return {"definition": defn}
 
 
+class UpdateFailed(Exception):
+    """Raised when updateDefinition returns a non-retryable error."""
+
+
 def update_item_definition(
     session: requests.Session,
     item_id: str,
@@ -269,14 +273,16 @@ def update_item_definition(
     body = _definition_body(parts, item_type)
     resp = session.post(url, json=body, timeout=120)
 
-    if resp.status_code == 400:
+    if resp.status_code in (400, 404):
         try:
             err_body = resp.json()
         except Exception:
             err_body = {"raw": resp.text[:500]}
         code = err_body.get("errorCode", "")
         msg  = err_body.get("message", err_body.get("raw", "unknown"))
-        raise ValueError(f"updateDefinition failed (400 – {code}): {msg}")
+        raise UpdateFailed(
+            f"updateDefinition failed ({resp.status_code} – {code}): {msg}"
+        )
 
     handle_response(session, resp)
 
@@ -716,12 +722,29 @@ def main():
                 print("    Creating new item …")
                 new_id = create_item_with_definition(session, display_name, item_type, parts)
                 print(f"    ✓ Created  {new_id}")
-                # Add to index in case of duplicates in same run
                 existing[lookup_key] = new_id
                 results["created"] += 1
 
+        except UpdateFailed as exc:
+            if not existing_id:
+                print(f"    ERROR – {exc}")
+                results["errors"] += 1
+                continue
+            # Fallback: delete the item and recreate with definition
+            print(f"    Update not supported – falling back to delete + recreate …")
+            print(f"      Reason: {exc}")
+            try:
+                delete_item(session, existing_id)
+                print(f"    ✓ Deleted  {existing_id}")
+                new_id = create_item_with_definition(session, display_name, item_type, parts)
+                print(f"    ✓ Recreated  {new_id}")
+                existing[lookup_key] = new_id
+                results["deployed"] += 1
+            except Exception as exc2:
+                print(f"    ERROR during recreate – {exc2}")
+                results["errors"] += 1
+
         except ValueError as exc:
-            # updateDefinition not supported – log and move on
             print(f"    SKIP – {exc}")
             results["skipped"] += 1
         except Exception as exc:
