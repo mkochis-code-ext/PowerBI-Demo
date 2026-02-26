@@ -50,6 +50,8 @@ import time
 import base64
 import pathlib
 import re
+import zipfile
+import io
 import requests
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,15 @@ METADATA_ONLY_TYPES = {
 
 # Files to exclude from the definition parts list.
 EXCLUDED_FILES = {".platform"}
+
+# File extensions that are ZIP archives whose raw bytes may differ between
+# exports even when the logical content is identical (embedded timestamps,
+# compression metadata, etc.).
+ZIP_EXTENSIONS = {".dacpac", ".bacpac", ".nupkg"}
+
+# Member files inside ZIP archives that contain volatile build metadata
+# regenerated on every Fabric export.
+ZIP_VOLATILE_MEMBERS = {"DacMetadata.xml", "Origin.xml"}
 
 # Long-running operation poll settings
 POLL_INTERVAL = 5    # seconds between polls
@@ -241,6 +252,118 @@ def build_parts(item_dir: pathlib.Path) -> list[dict]:
             "payloadType": "InlineBase64",
         })
     return parts
+
+
+# ---------------------------------------------------------------------------
+# Content comparison  (avoids unnecessary updateDefinition calls)
+# ---------------------------------------------------------------------------
+
+def _zip_contents_signature(data: bytes) -> list[tuple[str, int, int]]:
+    """Return sorted list of (filename, CRC-32, size) for non-volatile members."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            return sorted(
+                (i.filename, i.CRC, i.file_size)
+                for i in z.infolist()
+                if i.filename not in ZIP_VOLATILE_MEMBERS
+            )
+    except (zipfile.BadZipFile, Exception):
+        return []  # will cause a mismatch → safe to update
+
+
+def _bytes_equal(a: bytes, b: bytes, path: str) -> bool:
+    """Compare two byte sequences, using ZIP-aware logic for known archives."""
+    suffix = pathlib.PurePosixPath(path).suffix.lower()
+    if suffix in ZIP_EXTENSIONS:
+        return _zip_contents_signature(a) == _zip_contents_signature(b)
+    return a == b
+
+
+def get_remote_definition(
+    session: requests.Session,
+    item_id: str,
+) -> dict | None:
+    """Download the current definition of an item from the target workspace.
+
+    Returns the definition dict or None if unavailable.
+    """
+    url  = f"{FABRIC_BASE}/workspaces/{TARGET_WORKSPACE_ID}/items/{item_id}/getDefinition"
+    resp = session.post(url, timeout=60)
+
+    if resp.status_code in (400, 404):
+        return None
+
+    if resp.status_code == 200:
+        return resp.json().get("definition")
+
+    if resp.status_code == 202:
+        operation_id = resp.headers.get("x-ms-operation-id", "")
+        if not operation_id:
+            location     = resp.headers.get("Location", "")
+            operation_id = location.rstrip("/").split("/")[-1]
+        if not operation_id:
+            return None
+        try:
+            result = poll_lro(session, operation_id)
+            if result and isinstance(result, dict):
+                return result.get("definition", result)
+        except Exception:
+            return None
+
+    return None
+
+
+def definitions_match(
+    local_parts: list[dict],
+    remote_definition: dict | None,
+) -> bool:
+    """Return True if the local parts are identical to the remote definition.
+
+    Compares decoded payloads byte-for-byte (or ZIP-content-aware for
+    archive types).  Returns False if the remote definition is unavailable
+    so that an update is always attempted in that case.
+    """
+    if remote_definition is None:
+        return False
+
+    remote_parts = remote_definition.get("parts", [])
+
+    # Build lookup: path → decoded bytes for remote
+    remote_by_path: dict[str, bytes] = {}
+    for part in remote_parts:
+        path = part.get("path", "")
+        # Skip .platform in remote too
+        if pathlib.PurePosixPath(path).name in EXCLUDED_FILES:
+            continue
+        payload_type = part.get("payloadType", "InlineBase64")
+        payload      = part.get("payload", "")
+        if payload_type == "InlineBase64":
+            remote_by_path[path] = base64.b64decode(payload)
+        else:
+            remote_by_path[path] = payload.encode("utf-8") if isinstance(payload, str) else payload
+
+    # Build lookup: path → decoded bytes for local
+    local_by_path: dict[str, bytes] = {}
+    for part in local_parts:
+        path = part.get("path", "")
+        payload_type = part.get("payloadType", "InlineBase64")
+        payload      = part.get("payload", "")
+        if payload_type == "InlineBase64":
+            local_by_path[path] = base64.b64decode(payload)
+        else:
+            local_by_path[path] = payload.encode("utf-8") if isinstance(payload, str) else payload
+
+    # Compare file sets
+    if set(local_by_path.keys()) != set(remote_by_path.keys()):
+        return False
+
+    # Compare content of each file
+    for path, local_data in local_by_path.items():
+        remote_data = remote_by_path[path]
+        if not _bytes_equal(local_data, remote_data, path):
+            return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +837,13 @@ def main():
 
         try:
             if existing_id:
+                # ── Compare with remote before updating ──────────────
+                print(f"    Comparing with remote definition {existing_id} …")
+                remote_def = get_remote_definition(session, existing_id)
+                if definitions_match(parts, remote_def):
+                    print("    — No changes detected, skipping update")
+                    results["skipped"] += 1
+                    continue
                 print(f"    Updating existing item {existing_id} …")
                 update_item_definition(session, existing_id, parts, item_type)
                 print("    ✓ Updated")
