@@ -73,7 +73,6 @@ DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()
 NO_DEPLOY_TYPES = {
     "SQLAnalyticsEndpoint",  # auto-generated from Lakehouse; cannot be deployed
     "SQLEndpoint",           # variant name for the same auto-generated endpoint
-    "SQLDatabase",           # managed database; no source definition
     "Dashboard",             # service-only; no source definition
     "MountedWarehouse",
     "MountedDataFactory",
@@ -92,6 +91,7 @@ FORMAT_BY_TYPE: dict[str, str] = {
 METADATA_ONLY_TYPES = {
     "Lakehouse",
     "Environment",
+    "SQLDatabase",
     "Warehouse",
 }
 
