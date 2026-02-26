@@ -95,9 +95,8 @@ METADATA_ONLY_TYPES = {
     "Warehouse",
 }
 
-# Files to exclude from the definition parts list.  The .platform file is
-# now included because the API requires it when updateMetadata=true.
-EXCLUDED_FILES: set[str] = set()
+# Files to exclude from the definition parts list.
+EXCLUDED_FILES = {".platform"}
 
 # Long-running operation poll settings
 POLL_INTERVAL = 5    # seconds between polls
@@ -266,8 +265,7 @@ def update_item_definition(
     parts: list[dict],
     item_type: str = "",
 ) -> None:
-    # updateMetadata=true forces a full overwrite even when there are conflicts
-    url  = f"{FABRIC_BASE}/workspaces/{TARGET_WORKSPACE_ID}/items/{item_id}/updateDefinition?updateMetadata=true"
+    url  = f"{FABRIC_BASE}/workspaces/{TARGET_WORKSPACE_ID}/items/{item_id}/updateDefinition"
     body = _definition_body(parts, item_type)
     resp = session.post(url, json=body, timeout=120)
 
@@ -323,7 +321,13 @@ def delete_item(session: requests.Session, item_id: str) -> None:
     resp = session.delete(url, timeout=60)
     if resp.status_code == 404:
         return  # already gone
-    resp.raise_for_status()
+    if not resp.ok:
+        try:
+            err_body = resp.json()
+            msg = err_body.get("message", err_body.get("errorCode", resp.text[:300]))
+        except Exception:
+            msg = resp.text[:300]
+        raise RuntimeError(f"Delete failed ({resp.status_code}): {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -676,26 +680,23 @@ def main():
         existing_id = existing.get(lookup_key)
 
         # ── Metadata-only types (Lakehouse, Environment, …) ──────────────
+        # These cannot be updated via the definition API and cannot be safely
+        # deleted when other items depend on them.  If the item already exists
+        # in the target workspace it is left as-is; otherwise it is created.
         if item_type in METADATA_ONLY_TYPES:
             if existing_id:
-                print(f"    Deleting existing item {existing_id} for re-creation …")
+                print(f"    OK – already exists ({existing_id}), skipping (metadata-only type)")
+                results["skipped"] += 1
+            else:
+                print("    Creating item (metadata-only – no definition upload) …")
                 try:
-                    delete_item(session, existing_id)
-                    print("    ✓ Deleted")
-                    results["deleted"] += 1
+                    new_id = create_item_no_definition(session, display_name, item_type)
+                    print(f"    ✓ Created  {new_id}")
+                    existing[lookup_key] = new_id
+                    results["created"] += 1
                 except Exception as exc:
-                    print(f"    ERROR deleting – {exc}")
+                    print(f"    ERROR – {exc}")
                     results["errors"] += 1
-                    continue
-            print("    Creating item (metadata-only – no definition upload) …")
-            try:
-                new_id = create_item_no_definition(session, display_name, item_type)
-                print(f"    ✓ Created  {new_id}")
-                existing[lookup_key] = new_id
-                results["created"] += 1
-            except Exception as exc:
-                print(f"    ERROR – {exc}")
-                results["errors"] += 1
             continue
 
         # ── Normal types with deployable definitions ─────────────────────
