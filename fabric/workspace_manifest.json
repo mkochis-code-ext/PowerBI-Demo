@@ -1,12 +1,12 @@
 {
   "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-  "syncedAt": "2026-02-26T17:09:01Z",
-  "totalItems": 11,
+  "syncedAt": "2026-02-26T19:49:13Z",
+  "totalItems": 10,
   "skippedCount": 2,
   "byType": {
     "Environment": 1,
     "Lakehouse": 1,
-    "Notebook": 5,
+    "Notebook": 4,
     "SQLDatabase": 1,
     "SQLEndpoint": 2,
     "SemanticModel": 1
@@ -79,13 +79,6 @@
       "id": "29162ff8-4582-4b96-872d-67ceceece9fa",
       "type": "Notebook",
       "displayName": "Delete Semantic Model",
-      "description": "New notebook",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb"
-    },
-    {
-      "id": "3c45d1aa-aa99-4f51-bf1e-4ec8ebefe244",
-      "type": "Notebook",
-      "displayName": "Add Calculated Measure Copy",
       "description": "New notebook",
       "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb"
     }
