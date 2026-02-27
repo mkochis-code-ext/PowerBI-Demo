@@ -1,8 +1,8 @@
 {
   "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-  "syncedAt": "2026-02-27T13:14:18Z",
+  "syncedAt": "2026-02-27T13:42:47Z",
   "totalItems": 10,
-  "skippedCount": 10,
+  "skippedCount": 2,
   "byType": {
     "Environment": 1,
     "Lakehouse": 1,
@@ -85,14 +85,6 @@
   ],
   "skippedItems": [
     {
-      "id": "30b43571-68e0-4c6d-ac75-a7970b3aea49",
-      "type": "SemanticModel",
-      "displayName": "demo_semantic_model",
-      "description": "",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
       "id": "1623fbb9-f8c8-4eb9-8259-f377130adf62",
       "type": "SQLEndpoint",
       "displayName": "DemoLakehouse",
@@ -107,62 +99,6 @@
       "description": "",
       "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
       "skipReason": "no getDefinition support"
-    },
-    {
-      "id": "92e99894-f4e9-4adb-b7c4-d082af29b0ce",
-      "type": "Notebook",
-      "displayName": "Create Semantic Model Data Source",
-      "description": "New notebook",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
-      "id": "80d18949-8b8d-4266-9289-99ba348d477d",
-      "type": "Lakehouse",
-      "displayName": "DemoLakehouse",
-      "description": "",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
-      "id": "7bb4979f-6384-4782-93ff-44812eb2a198",
-      "type": "SQLDatabase",
-      "displayName": "Test",
-      "description": "",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
-      "id": "face3c08-5d1d-4ec8-8029-57cdf1a1f7af",
-      "type": "Environment",
-      "displayName": "demo_env",
-      "description": "Environment",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
-      "id": "ad6797df-8e57-4428-b694-eac5c0cc0ef7",
-      "type": "Notebook",
-      "displayName": "Add Calculated Measure",
-      "description": "",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
-      "id": "ce389106-0fc6-48f6-a237-9c2cbb632e53",
-      "type": "Notebook",
-      "displayName": "Create Semantic Model from Scratch",
-      "description": "New notebook",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
-    },
-    {
-      "id": "29162ff8-4582-4b96-872d-67ceceece9fa",
-      "type": "Notebook",
-      "displayName": "Delete Semantic Model",
-      "description": "New notebook",
-      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-      "skipReason": "getDefinition returned nothing"
     }
   ]
 }
