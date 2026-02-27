@@ -59,7 +59,7 @@ jobs:
     needs: resolve-commit
     # Skip this job when the user selected prod-only
     if: ${{ inputs.environment != 'prod-only' }}
-    environment: Fabric-Test
+    environment: PowerBI-Test
     env:
       PYTHON_VERSION: '3.12'
 
@@ -75,7 +75,7 @@ jobs:
           git fetch origin ${{ inputs.branch || 'dev' }}
           git checkout origin/${{ inputs.branch || 'dev' }} -- workspace/
           echo "Pipeline scripts from: main"
-          echo "Fabric content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
+          echo "PowerBI content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -112,7 +112,7 @@ jobs:
       inputs.environment != 'test-only' &&
       (inputs.environment == 'prod-only' || needs.deploy-test.result == 'success') &&
       needs.resolve-commit.result == 'success'
-    environment: Fabric-Production
+    environment: PowerBI-Production
     env:
       PYTHON_VERSION: '3.12'
 
@@ -128,7 +128,7 @@ jobs:
           git fetch origin ${{ inputs.branch || 'dev' }}
           git checkout origin/${{ inputs.branch || 'dev' }} -- workspace/
           echo "Pipeline scripts from: main"
-          echo "Fabric content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
+          echo "PowerBI content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5

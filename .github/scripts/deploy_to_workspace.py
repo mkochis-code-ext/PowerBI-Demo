@@ -1,8 +1,8 @@
 """
-deploy_to_workspace.py  –  Fabric Workspace Deployer
+deploy_to_workspace.py  –  PowerBI Workspace Deployer
 
 Reads the 'workspace/' directory tree (written by sync_powerbi.py / the
-WorkspaceSync pipeline) and pushes item definitions to a target Fabric
+WorkspaceSync pipeline) and pushes item definitions to a target PowerBI
 workspace via the REST API.
 
 Modes of operation
@@ -39,7 +39,7 @@ Expected environment variables
 TENANT_ID            – Azure AD tenant ID
 CLIENT_ID            – Service Principal application (client) ID
 CLIENT_SECRET        – Service Principal client secret
-TARGET_WORKSPACE_ID  – Fabric workspace ID to deploy into
+TARGET_WORKSPACE_ID  – PowerBI workspace ID to deploy into
 DEPLOY_ITEM          – (optional) <DisplayName>.<ItemType> to selectively deploy
 """
 
@@ -734,7 +734,7 @@ def find_item_folder(source: pathlib.Path, user_input: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def main():
-    print("=== Fabric Workspace Deployer ===")
+    print("=== PowerBI Workspace Deployer ===")
     print(f"Source    : {SOURCE_ROOT.resolve()}")
     print(f"Target    : {TARGET_WORKSPACE_ID}")
     selective = bool(DEPLOY_ITEM)

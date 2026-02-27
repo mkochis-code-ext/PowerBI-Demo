@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  FABRIC_PIPELINE_NAME: 'PowerBI Deployment'   # exact display name in Fabric
+  PowerBI_PIPELINE_NAME: 'PowerBI Deployment'   # exact display name in PowerBI
   DEV_WORKSPACE_ID: ''   # Dev workspace ID (GUID) - leave empty to look up by name
   DEV_WORKSPACE_NAME: 'PowerBI-DEV'   # Dev workspace name (used if ID is empty)
   DEV_STAGE_NAME: 'Development'
@@ -16,7 +16,7 @@ env:
   PROD_STAGE_NAME: 'Production'
   FABRIC_RESOURCE: 'https://api.fabric.microsoft.com'
   # Optional: set DEBUG to 1 in GitHub Actions env/vars to enable verbose logs
-  DEBUG: '1'
+  DEBUG: '0'
   AZURE_CREDENTIALS: >-
     {"clientId":"${{ secrets.PowerBI_CLIENT_ID }}","clientSecret":"${{ secrets.PowerBI_CLIENT_SECRET }}","tenantId":"${{ secrets.PowerBI_TENANT_ID }}","subscriptionId":"${{ secrets.PowerBI_SUBSCRIPTION_ID }}"}
 
@@ -24,7 +24,7 @@ jobs:
   test:
     name: Promote to Test
     runs-on: ubuntu-latest
-    environment: Fabric-Test
+    environment: PowerBI-Test
     steps:
       - uses: actions/checkout@v4
 
@@ -33,13 +33,13 @@ jobs:
         with:
           creds: ${{ env.AZURE_CREDENTIALS }}
 
-      - name: "Fabric deploy: Development → Test (PowerShell)"
+      - name: "PowerBI deploy: Development → Test (PowerShell)"
         shell: pwsh
         run: |
           # ============================================================================
           # Script: Deploy from Development to Test
-          # Purpose: Promotes Fabric artifacts from Dev stage to Test stage using
-          #          Fabric Deployment Pipeline API with status polling
+          # Purpose: Promotes PowerBI artifacts from Dev stage to Test stage using
+          #          PowerBI Deployment Pipeline API with status polling
           # ============================================================================
           
           $ErrorActionPreference = 'Stop'
@@ -79,12 +79,12 @@ jobs:
           # STEP 1: Discover Pipeline and Stage Configuration
           # Re-discovers pipeline and stage IDs (not passed between jobs)
           # ============================================================================
-          Log "Discovering Fabric pipeline and stage IDs..."
+          Log "Discovering PowerBI pipeline and stage IDs..."
           $r = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines"
           if ($r.ExitCode -ne 0){ $r.ErrText | Out-Host; Fail "Failed listing pipelines" }
           $pipelines = ($r.OutJson | ConvertFrom-Json).value
 
-          $pipelineName = "${{ env.FABRIC_PIPELINE_NAME }}"
+          $pipelineName = "${{ env.POWERBI_PIPELINE_NAME }}"
           $pipeline = $pipelines | Where-Object { $_.displayName -eq $pipelineName } | Select-Object -First 1
           if (-not $pipeline){ Fail "Pipeline '$pipelineName' not found" }
           $pipelineId = $pipeline.id
@@ -182,7 +182,7 @@ jobs:
     name: Promote to Production
     runs-on: ubuntu-latest
     needs: test
-    environment: Fabric-Production
+    environment: PowerBI-Production
     steps:
       - uses: actions/checkout@v4
 
@@ -191,13 +191,13 @@ jobs:
         with:
           creds: ${{ env.AZURE_CREDENTIALS }}
 
-      - name: "Fabric deploy: Test → Production (PowerShell)"
+      - name: "PowerBI deploy: Test → Production (PowerShell)"
         shell: pwsh
         run: |
           # ============================================================================
           # Script: Deploy from Test to Production
-          # Purpose: Promotes Fabric artifacts from Test stage to Production stage using
-          #          Fabric Deployment Pipeline API with status polling
+          # Purpose: Promotes PowerBI artifacts from Test stage to Production stage using
+          #          PowerBI Deployment Pipeline API with status polling
           # ============================================================================
           
           $ErrorActionPreference = 'Stop'
@@ -240,7 +240,7 @@ jobs:
           if ($r.ExitCode -ne 0){ $r.ErrText | Out-Host; Fail "Failed listing pipelines" }
           $pipelines = ($r.OutJson | ConvertFrom-Json).value
 
-          $pipelineName = "${{ env.FABRIC_PIPELINE_NAME }}"
+          $pipelineName = "${{ env.POWERBI_PIPELINE_NAME }}"
           $pipeline = $pipelines | Where-Object { $_.displayName -eq $pipelineName } | Select-Object -First 1
           if (-not $pipeline){ Fail "Pipeline '$pipelineName' not found" }
           $pipelineId = $pipeline.id

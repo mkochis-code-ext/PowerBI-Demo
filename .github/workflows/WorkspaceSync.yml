@@ -12,7 +12,7 @@
 #   POWERBI_TENANT_ID     – Azure AD tenant ID
 #   POWERBI_CLIENT_ID     – Service Principal application (client) ID
 #   POWERBI_CLIENT_SECRET – Service Principal client secret
-#   POWERBI_WORKSPACE_ID  – Fabric workspace ID to sync
+#   POWERBI_WORKSPACE_ID  – PowerBI workspace ID to sync
 #
 # The GITHUB_TOKEN secret is provided automatically by GitHub Actions and is
 # used for the final git push.  No additional PAT is needed as long as the
@@ -83,7 +83,7 @@ jobs:
       #    files under the 'workspace/' directory tree.
       #    New content overwrites existing files; nothing is deleted.
       # -----------------------------------------------------------------------
-      - name: Sync Fabric workspace source files
+      - name: Sync PowerBI workspace source files
         env:
           TENANT_ID:     ${{ secrets.POWERBI_TENANT_ID }}
           CLIENT_ID:     ${{ secrets.POWERBI_CLIENT_ID }}
@@ -113,7 +113,7 @@ jobs:
             echo "No changes detected – workspace is already up to date."
           else
             TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            git commit -m "chore: sync Fabric workspace source files [${TIMESTAMP}]"
+            git commit -m "chore: sync PowerBI workspace source files [${TIMESTAMP}]"
 
             # Push; --force-with-lease is safer than --force but still
             # overwrites any diverged state caused by concurrent runs

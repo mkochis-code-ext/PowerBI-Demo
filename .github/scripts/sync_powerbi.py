@@ -31,7 +31,7 @@ Expected environment variables
 TENANT_ID      – Azure AD tenant ID
 CLIENT_ID      – Service Principal application (client) ID
 CLIENT_SECRET  – Service Principal client secret
-WORKSPACE_ID   – Fabric workspace ID to sync
+WORKSPACE_ID   – PowerBI workspace ID to sync
 """
 
 import os
@@ -338,7 +338,7 @@ def write_manifest(items: list, skipped: list) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
-    print("=== Fabric Workspace Source Backup ===")
+    print("=== PowerBI Workspace Source Backup ===")
     print(f"Workspace : {WORKSPACE_ID}")
     print(f"Output    : {OUTPUT_ROOT.resolve()}")
 

@@ -1,6 +1,6 @@
-# Fabric CI/CD Automation
+# PowerBI CI/CD Automation
 
-Automated backup, deployment, and promotion of Microsoft Fabric workspace artifacts using GitHub Actions. This repository provides **two independent deployment strategies** — choose the one that fits your workflow, or use both together.
+Automated backup, deployment, and promotion of Microsoft PowerBI workspace artifacts using GitHub Actions. This repository provides **two independent deployment strategies** — choose the one that fits your workflow, or use both together.
 
 ## Table of Contents
 
@@ -9,17 +9,17 @@ Automated backup, deployment, and promotion of Microsoft Fabric workspace artifa
 - [GitHub Actions Workflows](#github-actions-workflows)
   - [WorkspaceSync — Source Backup](#workspacesync--source-backup)
   - [WorkspaceDeploy — REST API Deploy](#workspacedeploy--rest-api-deploy)
-  - [WorkspacePipelineDeploy — Fabric Deployment Pipeline](#workspacepipelinedeploy--fabric-deployment-pipeline)
+  - [WorkspacePipelineDeploy — PowerBI Deployment Pipeline](#workspacepipelinedeploy--fabric-deployment-pipeline)
 - [Python Scripts](#python-scripts)
   - [sync_powerbi.py](#sync_powerbipy)
   - [deploy_to_workspace.py](#deploy_to_workspacepy)
 - [Choosing a Deployment Strategy](#choosing-a-deployment-strategy)
 - [Setup & Configuration](#setup--configuration)
   - [1. Create an Azure AD Service Principal](#1-create-an-azure-ad-service-principal)
-  - [2. Grant Fabric Permissions](#2-grant-fabric-permissions)
+  - [2. Grant PowerBI Permissions](#2-grant-fabric-permissions)
   - [3. Configure GitHub Secrets](#3-configure-github-secrets)
   - [4. Create GitHub Environments](#4-create-github-environments)
-  - [5. Fabric Deployment Pipeline Setup (WorkspacePipelineDeploy only)](#5-fabric-deployment-pipeline-setup-workspacepipelinedeploy-only)
+  - [5. PowerBI Deployment Pipeline Setup (WorkspacePipelineDeploy only)](#5-fabric-deployment-pipeline-setup-workspacepipelinedeploy-only)
   - [6. Workflow Permissions](#6-workflow-permissions)
 - [Configuration Reference](#configuration-reference)
 - [API & Library Reference](#api--library-reference)
@@ -40,11 +40,11 @@ The automation in this repository covers three scenarios:
 
 | Workflow | Purpose | Trigger |
 |----------|---------|---------|
-| **WorkspaceSync** | Download every artifact from a Fabric workspace into the `workspace/` directory and commit to `main` | Scheduled (every 4 hours) or manual |
+| **WorkspaceSync** | Download every artifact from a PowerBI workspace into the `workspace/` directory and commit to `main` | Scheduled (every 4 hours) or manual |
 | **WorkspaceDeploy** | Push the `workspace/` directory contents to a target workspace via the Fabric REST API (create / update / delete items) | Manual — choose branch, environment, and optional single-item deploy |
-| **WorkspacePipelineDeploy** | Promote artifacts through a **Fabric Deployment Pipeline** (Dev → Test → Prod) using the built-in Deployment Pipelines API | Manual |
+| **WorkspacePipelineDeploy** | Promote artifacts through a **PowerBI Deployment Pipeline** (Dev → Test → Prod) using the built-in Deployment Pipelines API | Manual |
 
-The `workspace/` folder in this repository contains example Fabric artifacts (Notebooks, Semantic Models, a Lakehouse, a SQL Database, and an Environment). These are provided as sample content and are managed automatically by the sync and deploy pipelines.
+The `workspace/` folder in this repository contains example PowerBI artifacts (Notebooks, Semantic Models, a Lakehouse, a SQL Database, and an Environment). These are provided as sample content and are managed automatically by the sync and deploy pipelines.
 
 ---
 
@@ -59,7 +59,7 @@ The `workspace/` folder in this repository contains example Fabric artifacts (No
   workflows/
     WorkspaceSync.yml         # Backup workflow
     WorkspaceDeploy.yml       # REST API deploy workflow
-    WorkspacePipelineDeploy.yml  # Fabric Deployment Pipeline workflow
+    WorkspacePipelineDeploy.yml  # PowerBI Deployment Pipeline workflow
 workspace/                       # Artifact source files (auto-managed by sync)
 ```
 
@@ -71,7 +71,7 @@ workspace/                       # Artifact source files (auto-managed by sync)
 
 **File:** `.github/workflows/WorkspaceSync.yml`
 
-Downloads the source definition of every item in a Fabric workspace and commits the files to `main`. This gives you a full version-controlled backup of your workspace.
+Downloads the source definition of every item in a PowerBI workspace and commits the files to `main`. This gives you a full version-controlled backup of your workspace.
 
 | Setting | Value |
 |---------|-------|
@@ -85,7 +85,7 @@ Downloads the source definition of every item in a Fabric workspace and commits 
 1. Checks out `main`.
 2. Runs `sync_powerbi.py`, which authenticates as a service principal, lists all workspace items, and calls `getDefinition` on each one.
 3. Decoded source files are written to `workspace/<ItemName>.<ItemType>/`. Each file is **compared with its existing copy** before writing — unchanged files are skipped to avoid false-positive git diffs.
-4. For ZIP-based formats (`.dacpac`, `.bacpac`, `.nupkg`), comparison uses the ZIP central-directory metadata (CRC-32, filename, uncompressed size) rather than raw bytes, because Fabric regenerates the archive envelope on every export. Volatile members (`DacMetadata.xml`, `Origin.xml`) are excluded from the comparison.
+4. For ZIP-based formats (`.dacpac`, `.bacpac`, `.nupkg`), comparison uses the ZIP central-directory metadata (CRC-32, filename, uncompressed size) rather than raw bytes, because PowerBI regenerates the archive envelope on every export. Volatile members (`DacMetadata.xml`, `Origin.xml`) are excluded from the comparison.
 5. A `workspace_manifest.json` is generated with metadata about the sync.
 6. Changes are staged, committed, and pushed to `main` with `--force-with-lease`.
 
@@ -97,7 +97,7 @@ If there are no changes the workflow exits cleanly without creating a commit. Th
 
 **File:** `.github/workflows/WorkspaceDeploy.yml`
 
-Deploys artifact definitions from the `workspace/` directory directly to one or more target Fabric workspaces using the Fabric REST API. This workflow does **not** use Fabric Deployment Pipelines — it creates, updates, and deletes items directly.
+Deploys artifact definitions from the `workspace/` directory directly to one or more target PowerBI workspaces using the Fabric REST API. This workflow does **not** use PowerBI Deployment Pipelines — it creates, updates, and deletes items directly.
 
 | Setting | Value |
 |---------|-------|
@@ -115,22 +115,22 @@ Deploys artifact definitions from the `workspace/` directory directly to one or 
 **How it works:**
 
 1. **resolve-commit** — Resolves the HEAD SHA of the selected branch so both deploy jobs use the same ref.
-2. **deploy-test** — Checks out `main` for pipeline scripts, then overlays the `workspace/` directory from the target branch. Runs `deploy_to_workspace.py` against the **TEST** workspace. Gated behind the `Fabric-Test` environment.
-3. **deploy-prod** — Same process targeting the **PROD** workspace, gated behind `Fabric-Production`. Runs after test succeeds (or independently if `prod-only` is selected).
+2. **deploy-test** — Checks out `main` for pipeline scripts, then overlays the `workspace/` directory from the target branch. Runs `deploy_to_workspace.py` against the **TEST** workspace. Gated behind the `PowerBI-Test` environment.
+3. **deploy-prod** — Same process targeting the **PROD** workspace, gated behind `PowerBI-Production`. Runs after test succeeds (or independently if `prod-only` is selected).
 
 **Full deploy** (default, no `item` input): The target workspace is made to exactly mirror the repo — new items are created, existing items are updated (only when content has changed), and items in the workspace that are not in the repo are deleted.
 
 **Selective deploy** (`item` input set): Only the named item and its transitive dependencies are deployed. Nothing is deleted.
 
-**Content comparison before update:** For existing items, the deploy script downloads the current remote definition and compares it with the local files before calling `updateDefinition`. If the definitions match, the update is skipped entirely — this avoids unnecessary API calls, preserves item IDs, and prevents audit-log noise in the Fabric portal. ZIP-based formats (`.dacpac`, etc.) use central-directory metadata comparison, and volatile members are excluded, matching the same logic used by the sync script.
+**Content comparison before update:** For existing items, the deploy script downloads the current remote definition and compares it with the local files before calling `updateDefinition`. If the definitions match, the update is skipped entirely — this avoids unnecessary API calls, preserves item IDs, and prevents audit-log noise in the PowerBI portal. ZIP-based formats (`.dacpac`, etc.) use central-directory metadata comparison, and volatile members are excluded, matching the same logic used by the sync script.
 
 ---
 
-### WorkspacePipelineDeploy — Fabric Deployment Pipeline
+### WorkspacePipelineDeploy — PowerBI Deployment Pipeline
 
 **File:** `.github/workflows/WorkspacePipelineDeploy.yml`
 
-Promotes artifacts through a Fabric Deployment Pipeline using the native Deployment Pipelines API. This assumes you already have a configured Deployment Pipeline in Fabric with workspaces assigned to each stage.
+Promotes artifacts through a PowerBI Deployment Pipeline using the native Deployment Pipelines API. This assumes you already have a configured Deployment Pipeline in PowerBI with workspaces assigned to each stage.
 
 | Setting | Value |
 |---------|-------|
@@ -139,8 +139,8 @@ Promotes artifacts through a Fabric Deployment Pipeline using the native Deploym
 
 **Jobs:**
 
-1. **Promote to Test** — Logs in with a service principal via `azure/login`, discovers the pipeline and stage IDs by name, then triggers a deployment from the Development stage to the Test stage. Polls for completion. Gated behind `Fabric-Test`.
-2. **Promote to Production** — After Test succeeds, triggers a deployment from Test to Production. Polls for completion. Gated behind `Fabric-Production`.
+1. **Promote to Test** — Logs in with a service principal via `azure/login`, discovers the pipeline and stage IDs by name, then triggers a deployment from the Development stage to the Test stage. Polls for completion. Gated behind `PowerBI-Test`.
+2. **Promote to Production** — After Test succeeds, triggers a deployment from Test to Production. Polls for completion. Gated behind `PowerBI-Production`.
 
 If the source and target stages are already in sync the workflow emits a warning and succeeds without error.
 
@@ -148,11 +148,11 @@ If the source and target stages are already in sync the workflow emits a warning
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FABRIC_PIPELINE_NAME` | `PowerBI Deployment` | Display name of the Fabric Deployment Pipeline |
+| `PowerBI_PIPELINE_NAME` | `PowerBI Deployment` | Display name of the PowerBI Deployment Pipeline |
 | `DEV_WORKSPACE_NAME` | `PowerBI-DEV` | Development workspace name (used for lookup) |
-| `DEV_STAGE_NAME` | `Development` | Stage name in the Fabric pipeline |
-| `TEST_STAGE_NAME` | `Test` | Stage name in the Fabric pipeline |
-| `PROD_STAGE_NAME` | `Production` | Stage name in the Fabric pipeline |
+| `DEV_STAGE_NAME` | `Development` | Stage name in the PowerBI pipeline |
+| `TEST_STAGE_NAME` | `Test` | Stage name in the PowerBI pipeline |
+| `PROD_STAGE_NAME` | `Production` | Stage name in the PowerBI pipeline |
 | `DEBUG` | `1` | Set to `1` for verbose logging |
 
 ---
@@ -163,7 +163,7 @@ If the source and target stages are already in sync the workflow emits a warning
 
 **File:** `.github/scripts/sync_powerbi.py`
 
-Authenticates as a service principal and downloads source definitions for every item in a Fabric workspace.
+Authenticates as a service principal and downloads source definitions for every item in a PowerBI workspace.
 
 **Supported item types** (anything that exposes `getDefinition`):
 
@@ -184,7 +184,7 @@ Authenticates as a service principal and downloads source definitions for every 
 - **Per-file content comparison** — each file is compared with the existing repo copy before writing. Identical files are skipped, so only genuine changes appear in the git diff.
 - **ZIP-aware comparison** — `.dacpac`, `.bacpac`, and `.nupkg` files are compared by their central-directory metadata (CRC-32, filename, uncompressed size) instead of raw bytes. Members with volatile timestamps (`DacMetadata.xml`, `Origin.xml`) are excluded.
 - Handles long-running operations (202 responses) with polling (5 s interval, 6 min max).
-- Output directory structure mirrors Fabric Git integration: `workspace/<DisplayName>.<ItemType>/`.
+- Output directory structure mirrors PowerBI Git integration: `workspace/<DisplayName>.<ItemType>/`.
 - Writes a `workspace_manifest.json` with a full inventory and sync timestamp.
 - Logs per-item and per-file statistics: items changed / unchanged, files written / skipped.
 
@@ -195,7 +195,7 @@ Authenticates as a service principal and downloads source definitions for every 
 | `TENANT_ID` | Azure AD tenant ID |
 | `CLIENT_ID` | Service principal application (client) ID |
 | `CLIENT_SECRET` | Service principal client secret |
-| `WORKSPACE_ID` | Fabric workspace ID to sync |
+| `WORKSPACE_ID` | PowerBI workspace ID to sync |
 
 ---
 
@@ -243,7 +243,7 @@ Dependencies are resolved transitively and deployed in topological order (depend
 | `TENANT_ID` | Azure AD tenant ID |
 | `CLIENT_ID` | Service principal application (client) ID |
 | `CLIENT_SECRET` | Service principal client secret |
-| `TARGET_WORKSPACE_ID` | Fabric workspace ID to deploy into |
+| `TARGET_WORKSPACE_ID` | PowerBI workspace ID to deploy into |
 | `DEPLOY_ITEM` | *(Optional)* Folder name for selective deploy (e.g. `Add Calculated Measure.Notebook`) |
 
 ---
@@ -252,14 +252,14 @@ Dependencies are resolved transitively and deployed in topological order (depend
 
 This repo offers two ways to move artifacts between environments. You can use one or both.
 
-| | WorkspaceDeploy (REST API) | WorkspacePipelineDeploy (Fabric Pipeline) |
+| | WorkspaceDeploy (REST API) | WorkspacePipelineDeploy (PowerBI Pipeline) |
 |-|---------------------------|------------------------------------------|
-| **Mechanism** | Reads files from Git, pushes definitions directly to target workspace | Uses Fabric's built-in Deployment Pipelines API to promote between stages |
+| **Mechanism** | Reads files from Git, pushes definitions directly to target workspace | Uses PowerBI's built-in Deployment Pipelines API to promote between stages |
 | **Branch support** | Deploy from any branch (`dev`, feature branches, etc.) | N/A — operates on workspaces already assigned to pipeline stages |
 | **Selective deploy** | Yes — deploy a single item + dependencies | No — promotes all artifacts in the stage |
-| **Deletes stale items** | Yes (full deploy mode) | No — Fabric pipelines only add/update |
-| **Requires Fabric Deployment Pipeline** | No | Yes |
-| **Best for** | Git-driven workflows, branch-based promotion, fine-grained control | Organizations already using Fabric Deployment Pipelines |
+| **Deletes stale items** | Yes (full deploy mode) | No — PowerBI pipelines only add/update |
+| **Requires PowerBI Deployment Pipeline** | No | Yes |
+| **Best for** | Git-driven workflows, branch-based promotion, fine-grained control | Organizations already using PowerBI Deployment Pipelines |
 
 **Recommended workflow:**
 
@@ -267,7 +267,7 @@ This repo offers two ways to move artifacts between environments. You can use on
 2. Create feature branches from `main`, make changes, and merge via pull request.
 3. Use **WorkspaceDeploy** to push branch content to Test and Production workspaces.
 
-Alternatively, if your team prefers Fabric's built-in promotion model, use **WorkspacePipelineDeploy** to push changes through the Fabric Deployment Pipeline stages after syncing the development workspace.
+Alternatively, if your team prefers PowerBI's built-in promotion model, use **WorkspacePipelineDeploy** to push changes through the PowerBI Deployment Pipeline stages after syncing the development workspace.
 
 ---
 
@@ -278,33 +278,33 @@ Alternatively, if your team prefers Fabric's built-in promotion model, use **Wor
 Register an application in Azure AD (Microsoft Entra ID):
 
 1. Go to **Azure Portal → Microsoft Entra ID → App registrations → New registration**.
-2. Give it a name (e.g. `Fabric-CI-CD`), select **Single tenant**, and register.
+2. Give it a name (e.g. `PowerBI-CI-CD`), select **Single tenant**, and register.
 3. Note the **Application (client) ID** and **Directory (tenant) ID**.
 4. Under **Certificates & secrets → Client secrets**, create a new secret and copy the value immediately.
 5. Note your **Azure Subscription ID** (needed for the WorkspacePipelineDeploy workflow).
 
-### 2. Grant Fabric Permissions
+### 2. Grant PowerBI Permissions
 
-The service principal needs access to your Fabric workspaces:
+The service principal needs access to your PowerBI workspaces:
 
-**a) Enable Service Principal access in Fabric:**
+**a) Enable Service Principal access in PowerBI:**
 
-1. Go to the **Fabric Admin Portal → Tenant settings**.
-2. Under **Developer settings**, enable **Service principals can use Fabric APIs**.
+1. Go to the **PowerBI Admin Portal → Tenant settings**.
+2. Under **Developer settings**, enable **Service principals can use PowerBI APIs**.
 3. Add the service principal (or a security group containing it) to the allowed list.
 
 **b) Add the Service Principal to each workspace:**
 
 For every workspace the automation touches (Dev, Test, Production):
 
-1. Open the workspace in Fabric.
+1. Open the workspace in PowerBI.
 2. Go to **Manage access** (the people icon).
 3. Click **Add people or groups** and search for your service principal by name.
 4. Assign the **Admin** role.
 
 **c) Add the Service Principal to the Deployment Pipeline** (WorkspacePipelineDeploy only):
 
-1. Open the Fabric Deployment Pipeline.
+1. Open the PowerBI Deployment Pipeline.
 2. Go to pipeline settings and add the service principal as an **Admin**.
 
 ### 3. Configure GitHub Secrets
@@ -321,7 +321,7 @@ Go to **GitHub → Repository → Settings → Secrets and variables → Actions
 | `POWERBI_PROD_WORKSPACE_ID` | WorkspaceDeploy | Target workspace ID for Production environment |
 | `POWERBI_SUBSCRIPTION_ID` | WorkspacePipelineDeploy | Azure subscription ID (used by `azure/login`) |
 
-> **Finding workspace IDs:** Open a workspace in Fabric. The URL contains the workspace ID: `https://app.fabric.microsoft.com/groups/<workspace-id>/...`
+> **Finding workspace IDs:** Open a workspace in PowerBI. The URL contains the workspace ID: `https://app.fabric.microsoft.com/groups/<workspace-id>/...`
 
 ### 4. Create GitHub Environments
 
@@ -329,16 +329,16 @@ Go to **GitHub → Repository → Settings → Environments** and create:
 
 | Environment | Purpose | Recommended Protection |
 |-------------|---------|----------------------|
-| `Fabric-Test` | Gates deployment to the Test workspace | Required reviewers |
-| `Fabric-Production` | Gates deployment to the Production workspace | Required reviewers, wait timer |
+| `PowerBI-Test` | Gates deployment to the Test workspace | Required reviewers |
+| `PowerBI-Production` | Gates deployment to the Production workspace | Required reviewers, wait timer |
 
 Environment protection rules control who can approve deployments and add optional wait timers before deployment begins.
 
-### 5. Fabric Deployment Pipeline Setup (WorkspacePipelineDeploy only)
+### 5. PowerBI Deployment Pipeline Setup (WorkspacePipelineDeploy only)
 
-If using the Fabric Deployment Pipeline workflow:
+If using the PowerBI Deployment Pipeline workflow:
 
-1. In Fabric, create a Deployment Pipeline named **`PowerBI Deployment`** (or update `FABRIC_PIPELINE_NAME` in the workflow).
+1. In PowerBI, create a Deployment Pipeline named **`PowerBI Deployment`** (or update `PowerBI_PIPELINE_NAME` in the workflow).
 2. Configure three stages named exactly: **`Development`**, **`Test`**, **`Production`**.
 3. Assign the appropriate workspace to each stage.
 4. Ensure the service principal has Admin access to the pipeline.
@@ -367,7 +367,7 @@ These are set in the workflow YAML and typically don't need to change:
 
 | Variable | Location | Default | Description |
 |----------|----------|---------|-------------|
-| `FABRIC_PIPELINE_NAME` | Workflow env | `PowerBI Deployment` | Must match the exact display name of your Fabric Deployment Pipeline |
+| `PowerBI_PIPELINE_NAME` | Workflow env | `PowerBI Deployment` | Must match the exact display name of your PowerBI Deployment Pipeline |
 | `DEV_WORKSPACE_NAME` | Workflow env | `PowerBI-DEV` | Used for lookup if `DEV_WORKSPACE_ID` is empty |
 | `DEV_STAGE_NAME` | Workflow env | `Development` | Must match the stage name in your pipeline |
 | `TEST_STAGE_NAME` | Workflow env | `Test` | Must match the stage name in your pipeline |
@@ -581,8 +581,8 @@ Standard-library modules used: `os`, `sys`, `json`, `time`, `base64`, `pathlib`,
 |---------|-------|-----|
 | `No access_token in authentication response` | Incorrect client ID, secret, or tenant ID | Verify `POWERBI_CLIENT_ID`, `POWERBI_CLIENT_SECRET`, and `POWERBI_TENANT_ID` secrets |
 | `getDefinition` returns 400/404 for an item | Item type does not support definition download | Expected for auto-generated types (SQL endpoints, etc.) — the script skips these gracefully |
-| `Pipeline 'PowerBI Deployment' not found` | Pipeline name mismatch | Ensure `FABRIC_PIPELINE_NAME` in the workflow matches the exact name in Fabric |
-| `Could not resolve source/target stage IDs` | Stage name mismatch | Ensure `DEV_STAGE_NAME`, `TEST_STAGE_NAME`, `PROD_STAGE_NAME` match the exact stage names in your Fabric pipeline |
+| `Pipeline 'PowerBI Deployment' not found` | Pipeline name mismatch | Ensure `PowerBI_PIPELINE_NAME` in the workflow matches the exact name in PowerBI |
+| `Could not resolve source/target stage IDs` | Stage name mismatch | Ensure `DEV_STAGE_NAME`, `TEST_STAGE_NAME`, `PROD_STAGE_NAME` match the exact stage names in your PowerBI pipeline |
 | `NoItemsToDeploy` warning | Source and target stages are already in sync | Not an error — the workflow succeeds with a warning |
 | `updateDefinition failed (400)` | Item definition is invalid or the type doesn't support update | Check the item type; metadata-only types (Lakehouse, Environment) cannot be updated via definition API |
 | WorkspaceSync commit push fails | `GITHUB_TOKEN` lacks write permission | Go to **Settings → Actions → General → Workflow permissions** and enable **Read and write** |
