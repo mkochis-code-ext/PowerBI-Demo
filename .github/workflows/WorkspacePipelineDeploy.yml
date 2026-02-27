@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  PowerBI_PIPELINE_NAME: 'PowerBI Deployment'   # exact display name in PowerBI
+  POWERBI_PIPELINE_NAME: 'PowerBI Deployment'   # exact display name in PowerBI
   DEV_WORKSPACE_ID: ''   # Dev workspace ID (GUID) - leave empty to look up by name
   DEV_WORKSPACE_NAME: 'PowerBI-DEV'   # Dev workspace name (used if ID is empty)
   DEV_STAGE_NAME: 'Development'
