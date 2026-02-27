@@ -71,6 +71,13 @@ NO_DEFINITION_TYPES = {
     "MountedDataFactory",
 }
 
+# Map of lower-cased item type to the definition format string the API
+# requires when downloading.  Types not listed here omit the format field,
+# letting the API use its default.
+FORMAT_BY_TYPE: dict[str, str] = {
+    "semanticmodel": "TMDL",
+}
+
 # Long-running operation poll settings
 POLL_INTERVAL = 5    # seconds between polls
 POLL_MAX      = 72   # 72 x 5 s = 6 min max per item
@@ -194,12 +201,20 @@ def list_workspace_items(session: requests.Session) -> list:
 # Fabric API – getDefinition
 # ---------------------------------------------------------------------------
 
-def get_item_definition(session: requests.Session, item_id: str) -> dict | None:
+def get_item_definition(
+    session: requests.Session,
+    item_id: str,
+    item_type: str = "",
+) -> dict | None:
     """
     POST  /workspaces/{workspaceId}/items/{itemId}/getDefinition
 
     Returns the 'definition' dict (containing a 'parts' list) or None when
     the item type does not support the endpoint.
+
+    For item types that require a specific format (e.g. SemanticModel → TMDL),
+    the format is included in the request body so the returned parts match
+    the repository layout.
 
     The API can respond:
       200  – definition returned synchronously
@@ -208,7 +223,11 @@ def get_item_definition(session: requests.Session, item_id: str) -> dict | None:
       404  – item not found
     """
     url  = f"{FABRIC_BASE}/workspaces/{WORKSPACE_ID}/items/{item_id}/getDefinition"
-    resp = session.post(url, timeout=60)
+
+    # Request the correct format so the returned parts match the repo layout
+    fmt = FORMAT_BY_TYPE.get(item_type.lower(), "") if item_type else ""
+    body = {"format": fmt} if fmt else None
+    resp = session.post(url, json=body, timeout=60)
 
     if resp.status_code in (400, 404):
         return None
@@ -258,6 +277,57 @@ def _poll_lro(session: requests.Session, operation_id: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Notebook content analysis
+# ---------------------------------------------------------------------------
+
+def _analyze_notebook_content(raw: bytes, rel_path: str) -> None:
+    """Parse a Fabric notebook .py file and log its content breakdown.
+
+    Reports the number of code cells, markdown (documentation/comment)
+    cells, and inline Python comment lines found.  This helps verify that
+    all notebook comments are being captured in the sync.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return  # binary content – not a parseable notebook
+
+    code_cells = 0
+    markdown_cells = 0
+    comment_lines = 0
+    in_code_cell = False
+    markdown_previews: list[str] = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "# CELL ********************":
+            code_cells += 1
+            in_code_cell = True
+        elif stripped == "# MARKDOWN ********************":
+            markdown_cells += 1
+            in_code_cell = False
+        elif stripped.startswith("# METADATA"):
+            in_code_cell = False
+        elif in_code_cell and stripped.startswith("#") and not stripped.startswith("# MAGIC"):
+            # Count inline Python comments within code cells
+            comment_lines += 1
+        elif not in_code_cell and stripped.startswith("# ") and not stripped.startswith("# META"):
+            # Capture first line of each markdown cell as a preview
+            if len(markdown_previews) < markdown_cells and markdown_cells > len(markdown_previews):
+                preview = stripped.lstrip("# ").strip()
+                if preview:
+                    markdown_previews.append(preview[:60])
+
+    parts = []
+    parts.append(f"{code_cells} code cell(s)")
+    parts.append(f"{markdown_cells} markdown/comment cell(s)")
+    parts.append(f"{comment_lines} inline comment(s)")
+    print(f"      Notebook content: {', '.join(parts)}")
+    for preview in markdown_previews:
+        print(f"        ▸ {preview}")
+
+
+# ---------------------------------------------------------------------------
 # Save definition parts
 # ---------------------------------------------------------------------------
 
@@ -299,6 +369,12 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> tuple[i
             raw = base64.b64decode(payload)
         else:
             raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+
+        # For Notebook items, analyse .py content to verify that
+        # markdown cells (documentation comments) and inline comments
+        # are present in the downloaded definition.
+        if item_type.lower() == "notebook" and rel_path.endswith(".py"):
+            _analyze_notebook_content(raw, rel_path)
 
         if write_file(item_dir / rel_path, raw):
             written += 1
@@ -385,7 +461,7 @@ def main():
             continue
 
         try:
-            definition = get_item_definition(session, item_id)
+            definition = get_item_definition(session, item_id, item_type)
             if definition is None:
                 print("    SKIP – getDefinition not supported or returned nothing")
                 skipped.append({**item, "skipReason": "getDefinition returned nothing"})

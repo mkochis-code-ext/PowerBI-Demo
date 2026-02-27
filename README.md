@@ -183,6 +183,8 @@ Authenticates as a service principal and downloads source definitions for every 
 **Key behaviors:**
 - **Per-file content comparison** — each file is compared with the existing repo copy before writing. Identical files are skipped, so only genuine changes appear in the git diff.
 - **ZIP-aware comparison** — `.dacpac`, `.bacpac`, and `.nupkg` files are compared by their central-directory metadata (CRC-32, filename, uncompressed size) instead of raw bytes. Members with volatile timestamps (`DacMetadata.xml`, `Origin.xml`) are excluded.
+- **Format-aware definition requests** — item types that require a specific format (e.g. SemanticModel → TMDL) include the format in the `getDefinition` request body so the returned parts match the repo layout.
+- **Notebook content analysis** — after downloading each notebook, the `.py` file is parsed and logged with a breakdown of code cells, markdown/comment cells, and inline comments. This verifies that all notebook documentation is being captured.
 - Handles long-running operations (202 responses) with polling (5 s interval, 6 min max).
 - Output directory structure mirrors PowerBI Git integration: `workspace/<DisplayName>.<ItemType>/`.
 - Writes a `workspace_manifest.json` with a full inventory and sync timestamp.
@@ -382,6 +384,7 @@ These are set in the Python source and can be adjusted:
 |----------|---------|-------------|
 | `POLL_INTERVAL` | `5` seconds | Time between polling attempts for long-running operations |
 | `POLL_MAX` | `72` | Maximum polling attempts (72 × 5 s = 6 min) |
+| `FORMAT_BY_TYPE` | `{"semanticmodel": "TMDL"}` | Definition format per item type (passed to `getDefinition` request body) |
 | `NO_DEFINITION_TYPES` | SQLAnalyticsEndpoint, SQLEndpoint, Dashboard, MountedWarehouse, MountedDataFactory | Item types skipped (no downloadable definition) |
 | `ZIP_EXTENSIONS` | `.dacpac`, `.bacpac`, `.nupkg` | File extensions compared via ZIP central-directory metadata |
 | `ZIP_VOLATILE_MEMBERS` | `DacMetadata.xml`, `Origin.xml` | ZIP members excluded from content comparison (volatile timestamps) |
