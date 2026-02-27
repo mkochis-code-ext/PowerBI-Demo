@@ -44,7 +44,7 @@ env:
 
 jobs:
   sync:
-    name: Sync Fabric Workspace to Repository
+    name: Sync PowerBI Workspace to Repository
     runs-on: ubuntu-latest
 
     # Give the GITHUB_TOKEN permission to push commits

@@ -1,5 +1,5 @@
 """
-sync_powerbi.py  –  Fabric Workspace Source Backup
+sync_powerbi.py  –  PowerBI Workspace Source Backup
 
 Uses the Microsoft Fabric REST API to discover every item in the target
 workspace and download its source definition files.  Content is decoded from
@@ -123,7 +123,7 @@ def _zip_contents_equal(a: bytes, b: bytes) -> bool:
     Compares only the central-directory metadata (file names, CRC-32
     checksums, and uncompressed sizes) without decompressing any data.
     Members listed in ``ZIP_VOLATILE_MEMBERS`` (e.g. DacMetadata.xml,
-    Origin.xml) are excluded because Fabric regenerates them with fresh
+    Origin.xml) are excluded because PowerBI regenerates them with fresh
     timestamps on every export even when the schema is unchanged.
     """
     try:
@@ -146,7 +146,7 @@ def write_file(path: pathlib.Path, data: bytes) -> bool:
     """Write *data* to *path* only if the content has actually changed.
 
     For ZIP-based formats (.dacpac, etc.) the comparison is done on the
-    archive member contents rather than the raw bytes, because Fabric
+    archive member contents rather than the raw bytes, because PowerBI
     regenerates the ZIP envelope on every export.
 
     Returns True if the file was written (new or changed), False if skipped.
@@ -267,7 +267,7 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> tuple[i
 
     Returns (written_count, skipped_count) so the caller can track totals.
 
-    Directory layout mirrors the Fabric GitHub integration exactly:
+    Directory layout mirrors the PowerBI GitHub integration exactly:
 
         workspace/<ItemDisplayName>.<ItemType>/<path returned by API>
 
@@ -288,7 +288,7 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> tuple[i
     written = 0
     skipped = 0
 
-    # <DisplayName>.<ItemType>  –  matches Fabric Git integration folder naming
+    # <DisplayName>.<ItemType>  –  matches PowerBI Git integration folder naming
     item_dir = OUTPUT_ROOT / f"{sanitize(item_name)}.{item_type}"
     for part in parts:
         rel_path     = part.get("path", "unknown_file")

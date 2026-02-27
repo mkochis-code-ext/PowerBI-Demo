@@ -31,7 +31,7 @@ references:
   • Report definition.pbir  → datasetReference pointing to semantic models
 Dependencies are resolved transitively (deps of deps are included).
 
-The .platform file (Fabric Git-integration metadata) is intentionally
+The .platform file (PowerBI Git-integration metadata) is intentionally
 excluded from the parts list sent to the API.
 
 Expected environment variables

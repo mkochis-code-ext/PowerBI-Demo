@@ -1,4 +1,4 @@
-# Fabric notebook source
+# PowerBI notebook source
 
 # METADATA ********************
 

@@ -235,7 +235,7 @@ jobs:
           }
 
           # Discover pipeline and stage IDs
-          Log "Discovering Fabric pipeline and stage IDs..."
+          Log "Discovering PowerBI pipeline and stage IDs..."
           $r = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines"
           if ($r.ExitCode -ne 0){ $r.ErrText | Out-Host; Fail "Failed listing pipelines" }
           $pipelines = ($r.OutJson | ConvertFrom-Json).value

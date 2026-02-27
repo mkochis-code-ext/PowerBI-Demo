@@ -566,9 +566,9 @@ Standard-library modules used: `os`, `sys`, `json`, `time`, `base64`, `pathlib`,
 ### Additional Resources
 
 - [Microsoft Fabric REST API — Full Reference](https://learn.microsoft.com/en-us/rest/api/fabric/core)
-- [Fabric Items — Get Item Definition](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/get-item-definition)
-- [Fabric Deployment Pipelines — Overview](https://learn.microsoft.com/en-us/fabric/cicd/deployment-pipelines/intro-to-deployment-pipelines)
-- [Fabric Git Integration — Overview](https://learn.microsoft.com/en-us/fabric/cicd/git-integration/intro-to-git-integration)
+- [PowerBI Items — Get Item Definition](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/get-item-definition)
+- [PowerBI Deployment Pipelines — Overview](https://learn.microsoft.com/en-us/fabric/cicd/deployment-pipelines/intro-to-deployment-pipelines)
+- [PowerBI Git Integration — Overview](https://learn.microsoft.com/en-us/fabric/cicd/git-integration/intro-to-git-integration)
 - [Microsoft Identity Platform — Client Credentials Flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow)
 - [Azure CLI — `az rest` command](https://learn.microsoft.com/en-us/cli/azure/reference-index?view=azure-cli-latest#az-rest)
 - [requests library documentation](https://docs.python-requests.org/en/latest/)
