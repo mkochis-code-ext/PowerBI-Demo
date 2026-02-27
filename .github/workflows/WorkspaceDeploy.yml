@@ -70,10 +70,10 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Overlay fabric/ from target branch
+      - name: Overlay workspace/ from target branch
         run: |
           git fetch origin ${{ inputs.branch || 'dev' }}
-          git checkout origin/${{ inputs.branch || 'dev' }} -- fabric/
+          git checkout origin/${{ inputs.branch || 'dev' }} -- workspace/
           echo "Pipeline scripts from: main"
           echo "Fabric content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
 
@@ -87,7 +87,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r .github/scripts/requirements.txt
 
-      - name: Deploy fabric/ contents to TEST workspace
+      - name: Deploy workspace/ contents to TEST workspace
         env:
           TENANT_ID:           ${{ secrets.POWERBI_TENANT_ID }}
           CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
@@ -123,10 +123,10 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Overlay fabric/ from target branch
+      - name: Overlay workspace/ from target branch
         run: |
           git fetch origin ${{ inputs.branch || 'dev' }}
-          git checkout origin/${{ inputs.branch || 'dev' }} -- fabric/
+          git checkout origin/${{ inputs.branch || 'dev' }} -- workspace/
           echo "Pipeline scripts from: main"
           echo "Fabric content from:   ${{ inputs.branch || 'dev' }} (${{ needs.resolve-commit.outputs.sha }})"
 
@@ -140,7 +140,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r .github/scripts/requirements.txt
 
-      - name: Deploy fabric/ contents to PROD workspace
+      - name: Deploy workspace/ contents to PROD workspace
         env:
           TENANT_ID:           ${{ secrets.POWERBI_TENANT_ID }}
           CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}

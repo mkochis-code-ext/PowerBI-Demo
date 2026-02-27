@@ -22,7 +22,14 @@ Automated backup, deployment, and promotion of Microsoft Fabric workspace artifa
   - [5. Fabric Deployment Pipeline Setup (WorkspacePipelineDeploy only)](#5-fabric-deployment-pipeline-setup-workspacepipelinedeploy-only)
   - [6. Workflow Permissions](#6-workflow-permissions)
 - [Configuration Reference](#configuration-reference)
-- [Fabric REST API Endpoints Used](#fabric-rest-api-endpoints-used)
+- [API & Library Reference](#api--library-reference)
+  - [Authentication](#authentication)
+  - [Workspace Items API](#microsoft-fabric-rest-api--workspace-items)
+  - [Deployment Pipelines API](#microsoft-fabric-rest-api--deployment-pipelines)
+  - [Long-Running Operations (LRO)](#long-running-operations-lro)
+  - [Python Dependencies](#python-dependencies)
+  - [GitHub Actions](#github-actions)
+  - [Additional Resources](#additional-resources)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -33,11 +40,11 @@ The automation in this repository covers three scenarios:
 
 | Workflow | Purpose | Trigger |
 |----------|---------|---------|
-| **WorkspaceSync** | Download every artifact from a Fabric workspace into the `fabric/` directory and commit to `main` | Scheduled (daily) or manual |
-| **WorkspaceDeploy** | Push the `fabric/` directory contents to a target workspace via the Fabric REST API (create / update / delete items) | Manual — choose branch, environment, and optional single-item deploy |
+| **WorkspaceSync** | Download every artifact from a Fabric workspace into the `workspace/` directory and commit to `main` | Scheduled (every 4 hours) or manual |
+| **WorkspaceDeploy** | Push the `workspace/` directory contents to a target workspace via the Fabric REST API (create / update / delete items) | Manual — choose branch, environment, and optional single-item deploy |
 | **WorkspacePipelineDeploy** | Promote artifacts through a **Fabric Deployment Pipeline** (Dev → Test → Prod) using the built-in Deployment Pipelines API | Manual |
 
-The `fabric/` folder in this repository contains example Fabric artifacts (Notebooks, Semantic Models, a Lakehouse, a SQL Database, and an Environment). These are provided as sample content and are managed automatically by the sync and deploy pipelines.
+The `workspace/` folder in this repository contains example Fabric artifacts (Notebooks, Semantic Models, a Lakehouse, a SQL Database, and an Environment). These are provided as sample content and are managed automatically by the sync and deploy pipelines.
 
 ---
 
@@ -46,14 +53,14 @@ The `fabric/` folder in this repository contains example Fabric artifacts (Noteb
 ```
 .github/
   scripts/
-    sync_powerbi.py          # Downloads workspace items to fabric/
-    deploy_to_workspace.py   # Deploys fabric/ items to a target workspace
+    sync_powerbi.py          # Downloads workspace items to workspace/
+    deploy_to_workspace.py   # Deploys workspace/ items to a target workspace
     requirements.txt         # Python dependency (requests)
   workflows/
     WorkspaceSync.yml         # Backup workflow
     WorkspaceDeploy.yml       # REST API deploy workflow
     WorkspacePipelineDeploy.yml  # Fabric Deployment Pipeline workflow
-fabric/                       # Artifact source files (auto-managed by sync)
+workspace/                       # Artifact source files (auto-managed by sync)
 ```
 
 ---
@@ -68,7 +75,7 @@ Downloads the source definition of every item in a Fabric workspace and commits 
 
 | Setting | Value |
 |---------|-------|
-| **Trigger** | Scheduled daily at 02:00 UTC, or manual `workflow_dispatch` |
+| **Trigger** | Scheduled every 4 hours (`0 */4 * * *`), or manual `workflow_dispatch` |
 | **Manual input** | Optional `workspace_id_override` to sync a different workspace without changing secrets |
 | **Runs on** | `ubuntu-latest`, Python 3.12 |
 | **Permissions** | `contents: write` (pushes commits via `GITHUB_TOKEN`) |
@@ -77,11 +84,12 @@ Downloads the source definition of every item in a Fabric workspace and commits 
 
 1. Checks out `main`.
 2. Runs `sync_powerbi.py`, which authenticates as a service principal, lists all workspace items, and calls `getDefinition` on each one.
-3. Decoded source files are written to `fabric/<ItemName>.<ItemType>/`.
-4. A `workspace_manifest.json` is generated with metadata about the sync.
-5. Changes are staged, committed, and pushed to `main` with `--force-with-lease`.
+3. Decoded source files are written to `workspace/<ItemName>.<ItemType>/`. Each file is **compared with its existing copy** before writing — unchanged files are skipped to avoid false-positive git diffs.
+4. For ZIP-based formats (`.dacpac`, `.bacpac`, `.nupkg`), comparison uses the ZIP central-directory metadata (CRC-32, filename, uncompressed size) rather than raw bytes, because Fabric regenerates the archive envelope on every export. Volatile members (`DacMetadata.xml`, `Origin.xml`) are excluded from the comparison.
+5. A `workspace_manifest.json` is generated with metadata about the sync.
+6. Changes are staged, committed, and pushed to `main` with `--force-with-lease`.
 
-If there are no changes the workflow exits cleanly without creating a commit.
+If there are no changes the workflow exits cleanly without creating a commit. The run summary logs per-item and per-file statistics (written vs. unchanged).
 
 ---
 
@@ -89,7 +97,7 @@ If there are no changes the workflow exits cleanly without creating a commit.
 
 **File:** `.github/workflows/WorkspaceDeploy.yml`
 
-Deploys artifact definitions from the `fabric/` directory directly to one or more target Fabric workspaces using the Fabric REST API. This workflow does **not** use Fabric Deployment Pipelines — it creates, updates, and deletes items directly.
+Deploys artifact definitions from the `workspace/` directory directly to one or more target Fabric workspaces using the Fabric REST API. This workflow does **not** use Fabric Deployment Pipelines — it creates, updates, and deletes items directly.
 
 | Setting | Value |
 |---------|-------|
@@ -107,12 +115,14 @@ Deploys artifact definitions from the `fabric/` directory directly to one or mor
 **How it works:**
 
 1. **resolve-commit** — Resolves the HEAD SHA of the selected branch so both deploy jobs use the same ref.
-2. **deploy-test** — Checks out `main` for pipeline scripts, then overlays the `fabric/` directory from the target branch. Runs `deploy_to_workspace.py` against the **TEST** workspace. Gated behind the `Fabric-Test` environment.
+2. **deploy-test** — Checks out `main` for pipeline scripts, then overlays the `workspace/` directory from the target branch. Runs `deploy_to_workspace.py` against the **TEST** workspace. Gated behind the `Fabric-Test` environment.
 3. **deploy-prod** — Same process targeting the **PROD** workspace, gated behind `Fabric-Production`. Runs after test succeeds (or independently if `prod-only` is selected).
 
-**Full deploy** (default, no `item` input): The target workspace is made to exactly mirror the repo — new items are created, existing items are updated, and items in the workspace that are not in the repo are deleted.
+**Full deploy** (default, no `item` input): The target workspace is made to exactly mirror the repo — new items are created, existing items are updated (only when content has changed), and items in the workspace that are not in the repo are deleted.
 
 **Selective deploy** (`item` input set): Only the named item and its transitive dependencies are deployed. Nothing is deleted.
+
+**Content comparison before update:** For existing items, the deploy script downloads the current remote definition and compares it with the local files before calling `updateDefinition`. If the definitions match, the update is skipped entirely — this avoids unnecessary API calls, preserves item IDs, and prevents audit-log noise in the Fabric portal. ZIP-based formats (`.dacpac`, etc.) use central-directory metadata comparison, and volatile members are excluded, matching the same logic used by the sync script.
 
 ---
 
@@ -171,9 +181,12 @@ Authenticates as a service principal and downloads source definitions for every 
 **Skipped types** (no downloadable definition): `SQLAnalyticsEndpoint`, `SQLEndpoint`, `Dashboard`, `MountedWarehouse`, `MountedDataFactory`.
 
 **Key behaviors:**
+- **Per-file content comparison** — each file is compared with the existing repo copy before writing. Identical files are skipped, so only genuine changes appear in the git diff.
+- **ZIP-aware comparison** — `.dacpac`, `.bacpac`, and `.nupkg` files are compared by their central-directory metadata (CRC-32, filename, uncompressed size) instead of raw bytes. Members with volatile timestamps (`DacMetadata.xml`, `Origin.xml`) are excluded.
 - Handles long-running operations (202 responses) with polling (5 s interval, 6 min max).
-- Output directory structure mirrors Fabric Git integration: `fabric/<DisplayName>.<ItemType>/`.
+- Output directory structure mirrors Fabric Git integration: `workspace/<DisplayName>.<ItemType>/`.
 - Writes a `workspace_manifest.json` with a full inventory and sync timestamp.
+- Logs per-item and per-file statistics: items changed / unchanged, files written / skipped.
 
 **Required environment variables:**
 
@@ -190,7 +203,7 @@ Authenticates as a service principal and downloads source definitions for every 
 
 **File:** `.github/scripts/deploy_to_workspace.py`
 
-Reads the `fabric/` directory and pushes item definitions to a target workspace.
+Reads the `workspace/` directory and pushes item definitions to a target workspace.
 
 **Two modes of operation:**
 
@@ -219,7 +232,7 @@ Dependencies are resolved transitively and deployed in topological order (depend
 | **Metadata-only** | Lakehouse, Environment, SQLDatabase, Warehouse | Created with name + type only (no definition upload). If the item already exists it is left as-is. |
 | **Skipped** | SQLAnalyticsEndpoint, SQLEndpoint, Dashboard, MountedWarehouse, MountedDataFactory | Cannot be deployed; skipped automatically |
 
-**SemanticModel format:** Definitions are uploaded in `TMDL` format (configured via `FORMAT_BY_TYPE`).
+**SemanticModel format:** Definitions are uploaded and downloaded in `TMDL` format (configured via `FORMAT_BY_TYPE`). When fetching the remote definition for comparison, the same format is requested so the parts are directly comparable.
 
 **`.platform` files** are excluded from the parts list sent to the API.
 
@@ -361,6 +374,18 @@ These are set in the workflow YAML and typically don't need to change:
 | `PROD_STAGE_NAME` | Workflow env | `Production` | Must match the stage name in your pipeline |
 | `DEBUG` | Workflow env | `1` | Set to `1` for verbose logging, `0` to disable |
 
+### sync_powerbi.py Constants
+
+These are set in the Python source and can be adjusted:
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `POLL_INTERVAL` | `5` seconds | Time between polling attempts for long-running operations |
+| `POLL_MAX` | `72` | Maximum polling attempts (72 × 5 s = 6 min) |
+| `NO_DEFINITION_TYPES` | SQLAnalyticsEndpoint, SQLEndpoint, Dashboard, MountedWarehouse, MountedDataFactory | Item types skipped (no downloadable definition) |
+| `ZIP_EXTENSIONS` | `.dacpac`, `.bacpac`, `.nupkg` | File extensions compared via ZIP central-directory metadata |
+| `ZIP_VOLATILE_MEMBERS` | `DacMetadata.xml`, `Origin.xml` | ZIP members excluded from content comparison (volatile timestamps) |
+
 ### deploy_to_workspace.py Constants
 
 These are set in the Python source and can be adjusted:
@@ -369,61 +394,184 @@ These are set in the Python source and can be adjusted:
 |----------|---------|-------------|
 | `POLL_INTERVAL` | `5` seconds | Time between polling attempts for long-running operations |
 | `POLL_MAX` | `72` | Maximum polling attempts (72 × 5 s = 6 min) |
-| `FORMAT_BY_TYPE` | `{"semanticmodel": "TMDL"}` | Definition format per item type |
+| `FORMAT_BY_TYPE` | `{"semanticmodel": "TMDL"}` | Definition format per item type (used for both upload and remote comparison) |
 | `METADATA_ONLY_TYPES` | Lakehouse, Environment, SQLDatabase, Warehouse | Types created without definition upload |
 | `EXCLUDED_FILES` | `.platform` | Files excluded from the parts list sent to the API |
+| `NO_DEPLOY_TYPES` | SQLAnalyticsEndpoint, SQLEndpoint, Dashboard, MountedWarehouse, MountedDataFactory | Item types that cannot be deployed |
+| `ZIP_EXTENSIONS` | `.dacpac`, `.bacpac`, `.nupkg` | File extensions compared via ZIP central-directory metadata |
+| `ZIP_VOLATILE_MEMBERS` | `DacMetadata.xml`, `Origin.xml` | ZIP members excluded from content comparison (volatile timestamps) |
 
 ---
 
-## Fabric REST API Endpoints Used
+## API & Library Reference
 
-All endpoints use the base URL `https://api.fabric.microsoft.com`.
-
-### Workspace & Item APIs
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/workspaces/{workspaceId}/items` | GET | List all items in a workspace |
-| `/v1/workspaces/{workspaceId}/items/{itemId}/getDefinition` | POST | Download item source definition |
-| `/v1/workspaces/{workspaceId}/items` | POST | Create a new item (with or without definition) |
-| `/v1/workspaces/{workspaceId}/items/{itemId}/updateDefinition` | POST | Update an existing item's definition |
-| `/v1/workspaces/{workspaceId}/items/{itemId}` | DELETE | Delete an item from the workspace |
-
-### Deployment Pipeline APIs
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/deploymentPipelines` | GET | List all deployment pipelines |
-| `/v1/deploymentPipelines/{pipelineId}/stages` | GET | List stages in a pipeline |
-| `/v1/deploymentPipelines/{pipelineId}/deploy` | POST | Trigger a stage-to-stage deployment |
-
-### Operations API
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/operations/{operationId}` | GET | Poll a long-running operation status |
-| `/v1/operations/{operationId}/result` | GET | Retrieve the result of a completed operation |
+A comprehensive reference of every external API endpoint and library used across the scripts and workflows, organized by functional area.
 
 ### Authentication
 
-**Python scripts** use OAuth 2.0 client credentials flow directly:
+Both Python scripts authenticate using the **OAuth 2.0 client credentials** grant. The WorkspacePipelineDeploy workflow authenticates via the Azure CLI instead.
 
-```
-POST https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token
-Scope: https://api.fabric.microsoft.com/.default
-```
+#### Microsoft Identity Platform — Token Endpoint
 
-**WorkspacePipelineDeploy** uses the Azure CLI via `azure/login`:
+| | |
+|-|-|
+| **URL** | `POST https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token` |
+| **Used by** | `sync_powerbi.py`, `deploy_to_workspace.py` |
+| **Purpose** | Acquire a bearer token for the Fabric REST API using a service principal (client ID + secret). |
+| **Request body** | `grant_type=client_credentials`, `client_id`, `client_secret`, `scope=https://api.fabric.microsoft.com/.default` |
+| **Response** | JSON with `access_token` (used as `Authorization: Bearer …` header on all subsequent calls). |
+| **Docs** | [Microsoft identity platform — client credentials flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow) |
 
-```shell
-az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv
-```
+#### Azure CLI — `az account get-access-token`
+
+| | |
+|-|-|
+| **Command** | `az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv` |
+| **Used by** | `WorkspacePipelineDeploy.yml` (PowerShell inline scripts) |
+| **Purpose** | Obtain a Fabric bearer token from the Azure CLI session established by `azure/login@v2`. |
+| **Why Azure CLI?** | The pipeline deploy workflow uses `az rest` for some API calls, which requires an active `az` login session. Using the CLI for token acquisition keeps authentication consistent within those scripts. |
+| **Docs** | [az account get-access-token](https://learn.microsoft.com/en-us/cli/azure/account?view=azure-cli-latest#az-account-get-access-token) |
+
+---
+
+### Microsoft Fabric REST API — Workspace Items
+
+Base URL: `https://api.fabric.microsoft.com/v1`
+
+#### List Items
+
+| | |
+|-|-|
+| **Endpoint** | `GET /workspaces/{workspaceId}/items` |
+| **Used by** | `sync_powerbi.py` — discover all items for backup; `deploy_to_workspace.py` — inventory the target workspace to decide create vs. update vs. delete. |
+| **Pagination** | OData-style — follow `continuationUri` in the response until absent. |
+| **Response** | `{ "value": [ { "id", "displayName", "type", … } ], "continuationUri": "…" }` |
+| **Docs** | [List Items](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/list-items) |
+
+#### Get Definition
+
+| | |
+|-|-|
+| **Endpoint** | `POST /workspaces/{workspaceId}/items/{itemId}/getDefinition` |
+| **Used by** | `sync_powerbi.py` — download source files for every item; `deploy_to_workspace.py` — fetch remote definition for content comparison before update. |
+| **Request body** | Optional `{ "format": "TMDL" }` — required for SemanticModel so that parts are returned in TMDL layout (the default is `model.bim`). |
+| **Response** | **200** — definition returned inline. **202** — long-running operation; poll via `x-ms-operation-id` (see [Operations](#long-running-operations-lro) below). **400/404** — item type does not support definitions. |
+| **Returned payload** | `{ "definition": { "parts": [ { "path", "payload" (base64), "payloadType" } ] } }` |
+| **Why POST?** | The API uses POST (not GET) because the request body can include format preferences. |
+| **Docs** | [Get Item Definition](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/get-item-definition) |
+
+#### Create Item
+
+| | |
+|-|-|
+| **Endpoint** | `POST /workspaces/{workspaceId}/items` |
+| **Used by** | `deploy_to_workspace.py` — create items that don't exist in the target workspace. |
+| **Request body** | `{ "displayName", "type", "definition": { "format"?, "parts": [ … ] } }` — for metadata-only types (Lakehouse, Environment, SQLDatabase, Warehouse) the `definition` field is omitted. |
+| **Response** | **200/201** — item created, returns `{ "id", … }`. **202** — long-running operation. |
+| **Docs** | [Create Item](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/create-item) |
+
+#### Update Definition
+
+| | |
+|-|-|
+| **Endpoint** | `POST /workspaces/{workspaceId}/items/{itemId}/updateDefinition` |
+| **Used by** | `deploy_to_workspace.py` — push updated source files to an existing item (only called when content comparison detects a difference). |
+| **Request body** | `{ "definition": { "format"?, "parts": [ { "path", "payload", "payloadType" } ] } }` |
+| **Response** | **200** — updated synchronously. **202** — long-running operation. **400** — invalid definition or unsupported type. |
+| **Docs** | [Update Item Definition](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/update-item-definition) |
+
+#### Delete Item
+
+| | |
+|-|-|
+| **Endpoint** | `DELETE /workspaces/{workspaceId}/items/{itemId}` |
+| **Used by** | `deploy_to_workspace.py` — remove workspace items that no longer exist in the repo (full deploy mode only). |
+| **Response** | **200** — deleted. **404** — already gone (treated as success). |
+| **Docs** | [Delete Item](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/delete-item) |
+
+---
+
+### Microsoft Fabric REST API — Deployment Pipelines
+
+Used exclusively by `WorkspacePipelineDeploy.yml`.
+
+#### List Deployment Pipelines
+
+| | |
+|-|-|
+| **Endpoint** | `GET /v1/deploymentPipelines` |
+| **Purpose** | Discover the pipeline ID by matching on the `displayName` configured in the workflow (`FABRIC_PIPELINE_NAME`). |
+| **Docs** | [List Deployment Pipelines](https://learn.microsoft.com/en-us/rest/api/fabric/core/deployment-pipelines/list-deployment-pipelines) |
+
+#### List Pipeline Stages
+
+| | |
+|-|-|
+| **Endpoint** | `GET /v1/deploymentPipelines/{pipelineId}/stages` |
+| **Purpose** | Discover stage IDs (Development, Test, Production) by matching on stage `displayName`. The stage IDs are required as `sourceStageId` / `targetStageId` in the deploy call. |
+| **Docs** | [List Deployment Pipeline Stages](https://learn.microsoft.com/en-us/rest/api/fabric/core/deployment-pipelines/list-deployment-pipeline-stages) |
+
+#### Deploy (Stage-to-Stage Promotion)
+
+| | |
+|-|-|
+| **Endpoint** | `POST /v1/deploymentPipelines/{pipelineId}/deploy` |
+| **Purpose** | Trigger an asynchronous promotion of all artifacts from one stage to another (Dev → Test, Test → Prod). |
+| **Request body** | `{ "sourceStageId", "targetStageId", "note": "GH Dev→Test" }` |
+| **Response** | **202** — deployment started. Headers: `x-ms-operation-id`, `Retry-After`, `Location` (status polling URL). |
+| **Error handling** | A `NoItemsToDeploy` error means source and target are already in sync — the workflow treats this as a warning, not a failure. |
+| **Docs** | [Deploy](https://learn.microsoft.com/en-us/rest/api/fabric/core/deployment-pipelines/deploy) |
+
+---
+
+### Long-Running Operations (LRO)
+
+Several Fabric endpoints return **202 Accepted** for operations that take longer than a few seconds. Both Python scripts and the PowerShell pipeline deploy script poll for completion.
+
+#### Poll Operation Status
+
+| | |
+|-|-|
+| **Endpoint** | `GET /v1/operations/{operationId}` |
+| **Purpose** | Check whether a long-running operation has completed. |
+| **Response** | `{ "status": "Running" | "Succeeded" | "Failed" | "Cancelled", "error"?: { "message" } }` |
+| **Poll cadence** | Every 5 seconds, up to 72 attempts (6 minutes) in both Python scripts. The PowerShell pipeline deploy uses the `Retry-After` header (default 10 s), up to 60 attempts. |
+
+#### Get Operation Result
+
+| | |
+|-|-|
+| **Endpoint** | `GET /v1/operations/{operationId}/result` |
+| **Purpose** | Retrieve the output payload once an operation succeeds (e.g., the item definition returned by an async `getDefinition`). |
+| **Docs** | [Long Running Operations](https://learn.microsoft.com/en-us/rest/api/fabric/core/long-running-operations) |
+
+---
+
+### Python Dependencies
+
+| Library | Version | Purpose | Repository |
+|---------|---------|---------|------------|
+| **requests** | `>=2.31.0` | All HTTP communication in both Python scripts — Azure AD token acquisition, Fabric REST API calls, LRO polling. The only third-party dependency. | [github.com/psf/requests](https://github.com/psf/requests) |
+
+Standard-library modules used: `os`, `sys`, `json`, `time`, `base64`, `pathlib`, `re`, `zipfile`, `io`.
+
+### GitHub Actions
+
+| Action | Version | Used by | Purpose |
+|--------|---------|---------|---------|
+| `actions/checkout@v4` | v4 | All workflows | Check out the repository at the correct ref |
+| `actions/setup-python@v5` | v5 | WorkspaceSync, WorkspaceDeploy | Install Python 3.12 and `pip install -r requirements.txt` |
+| `azure/login@v2` | v2 | WorkspacePipelineDeploy | Authenticate to Azure as the service principal (enables `az rest` / `az account get-access-token`) |
 
 ### Additional Resources
 
-- [Microsoft Fabric REST API Overview](https://learn.microsoft.com/en-us/rest/api/fabric/)
-- [Fabric Git Integration](https://learn.microsoft.com/en-us/fabric/cicd/git-integration/intro-to-git-integration)
-- [Fabric Deployment Pipelines](https://learn.microsoft.com/en-us/fabric/cicd/deployment-pipelines/intro-to-deployment-pipelines)
+- [Microsoft Fabric REST API — Full Reference](https://learn.microsoft.com/en-us/rest/api/fabric/core)
+- [Fabric Items — Get Item Definition](https://learn.microsoft.com/en-us/rest/api/fabric/core/items/get-item-definition)
+- [Fabric Deployment Pipelines — Overview](https://learn.microsoft.com/en-us/fabric/cicd/deployment-pipelines/intro-to-deployment-pipelines)
+- [Fabric Git Integration — Overview](https://learn.microsoft.com/en-us/fabric/cicd/git-integration/intro-to-git-integration)
+- [Microsoft Identity Platform — Client Credentials Flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow)
+- [Azure CLI — `az rest` command](https://learn.microsoft.com/en-us/cli/azure/reference-index?view=azure-cli-latest#az-rest)
+- [requests library documentation](https://docs.python-requests.org/en/latest/)
 
 ---
 

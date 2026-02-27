@@ -3,7 +3,7 @@ sync_powerbi.py  –  Fabric Workspace Source Backup
 
 Uses the Microsoft Fabric REST API to discover every item in the target
 workspace and download its source definition files.  Content is decoded from
-base64 and saved under 'fabric/' preserving the exact path structure returned
+base64 and saved under 'workspace/' preserving the exact path structure returned
 by the API.
 
   Item type              Source files saved
@@ -59,7 +59,7 @@ AUTH_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/toke
 # Fabric scope covers all Fabric items including Semantic Models / Power BI
 FABRIC_SCOPE  = "https://api.fabric.microsoft.com/.default"
 
-OUTPUT_ROOT   = pathlib.Path("fabric")
+OUTPUT_ROOT   = pathlib.Path("workspace")
 
 # Item types that are auto-generated / service-only and have no downloadable
 # source definition.
@@ -269,16 +269,16 @@ def save_definition(item_name: str, item_type: str, definition: dict) -> tuple[i
 
     Directory layout mirrors the Fabric GitHub integration exactly:
 
-        fabric/<ItemDisplayName>.<ItemType>/<path returned by API>
+        workspace/<ItemDisplayName>.<ItemType>/<path returned by API>
 
     Examples:
-        fabric/Sales Report.Report/definition.pbir
-        fabric/Sales Model.SemanticModel/model.bim
-        fabric/Bronze.Lakehouse/lakehouse.metadata.json
-        fabric/ETL Pipeline.DataPipeline/pipeline-content.json
-        fabric/Analysis.Notebook/notebook-content.ipynb
-        fabric/MyDB.SQLDatabase/SqlDatabase.json
-        fabric/Shared Env.Environment/environment.yml
+        workspace/Sales Report.Report/definition.pbir
+        workspace/Sales Model.SemanticModel/model.bim
+        workspace/Bronze.Lakehouse/lakehouse.metadata.json
+        workspace/ETL Pipeline.DataPipeline/pipeline-content.json
+        workspace/Analysis.Notebook/notebook-content.ipynb
+        workspace/MyDB.SQLDatabase/SqlDatabase.json
+        workspace/Shared Env.Environment/environment.yml
     """
     parts = definition.get("parts", [])
     if not parts:

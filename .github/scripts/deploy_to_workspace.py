@@ -1,7 +1,7 @@
 """
 deploy_to_workspace.py  –  Fabric Workspace Deployer
 
-Reads the 'fabric/' directory tree (written by sync_powerbi.py / the
+Reads the 'workspace/' directory tree (written by sync_powerbi.py / the
 WorkspaceSync pipeline) and pushes item definitions to a target Fabric
 workspace via the REST API.
 
@@ -66,7 +66,7 @@ FABRIC_BASE  = "https://api.fabric.microsoft.com/v1"
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 AUTH_URL     = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
-SOURCE_ROOT  = pathlib.Path("fabric")
+SOURCE_ROOT  = pathlib.Path("workspace")
 
 # Optional: selective deploy mode
 DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()

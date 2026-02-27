@@ -40,7 +40,7 @@ on:
 env:
   PYTHON_VERSION: '3.12'
   # All downloaded artefacts land under this directory inside the repository
-  OUTPUT_DIR: fabric
+  OUTPUT_DIR: workspace
 
 jobs:
   sync:
@@ -80,7 +80,7 @@ jobs:
       # -----------------------------------------------------------------------
       # 3. Run the sync script
       #    The script calls the Fabric getDefinition API and writes source
-      #    files under the 'fabric/' directory tree.
+      #    files under the 'workspace/' directory tree.
       #    New content overwrites existing files; nothing is deleted.
       # -----------------------------------------------------------------------
       - name: Sync Fabric workspace source files
