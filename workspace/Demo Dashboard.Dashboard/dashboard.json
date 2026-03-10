@@ -1,0 +1,21 @@
+{
+  "id": "87796d65-38c6-48ea-9842-4e929d5a41fa",
+  "displayName": "Demo Dashboard",
+  "isReadOnly": false,
+  "embedUrl": "https://app.powerbi.com/dashboardEmbed?dashboardId=87796d65-38c6-48ea-9842-4e929d5a41fa&config=eyJjbHVzdGVyVXJsIjoiaHR0cHM6Ly9XQUJJLVdFU1QtVVMzLUEtUFJJTUFSWS1yZWRpcmVjdC5hbmFseXNpcy53aW5kb3dzLm5ldCIsImVtYmVkRmVhdHVyZXMiOnt9fQ%3d%3d",
+  "tiles": [
+    {
+      "id": "38cfad18-e272-4ebd-8dbe-708721b31ccd",
+      "title": "Demo Dashboard",
+      "subTitle": "Click to open report",
+      "action": {
+        "openUrl": {
+          "targetUrl": "/reports/0ff5a75a-5b34-4262-a4f3-e38b949e6e97"
+        }
+      },
+      "embedUrl": "https://app.powerbi.com/embed?dashboardId=87796d65-38c6-48ea-9842-4e929d5a41fa&tileId=38cfad18-e272-4ebd-8dbe-708721b31ccd&config=eyJjbHVzdGVyVXJsIjoiaHR0cHM6Ly9XQUJJLVdFU1QtVVMzLUEtUFJJTUFSWS1yZWRpcmVjdC5hbmFseXNpcy53aW5kb3dzLm5ldCIsImVtYmVkRmVhdHVyZXMiOnt9fQ%3d%3d",
+      "rowSpan": 0,
+      "colSpan": 0
+    }
+  ]
+}
