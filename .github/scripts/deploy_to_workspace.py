@@ -34,6 +34,15 @@ Dependencies are resolved transitively (deps of deps are included).
 The .platform file (PowerBI Git-integration metadata) is intentionally
 excluded from the parts list sent to the API.
 
+Dashboard deployment
+--------------------
+Dashboards cannot be created through the Fabric definition API, so they
+are handled via the Power BI REST API instead.  An empty dashboard is
+created when it does not already exist.  If ``SOURCE_WORKSPACE_ID`` is
+set, tiles are cloned from the source dashboard and rebound to the
+corresponding reports / datasets in the target workspace (matched by
+name).
+
 Expected environment variables
 -------------------------------
 TENANT_ID            – Azure AD tenant ID
@@ -41,6 +50,7 @@ CLIENT_ID            – Service Principal application (client) ID
 CLIENT_SECRET        – Service Principal client secret
 TARGET_WORKSPACE_ID  – PowerBI workspace ID to deploy into
 DEPLOY_ITEM          – (optional) <DisplayName>.<ItemType> to selectively deploy
+SOURCE_WORKSPACE_ID  – (optional) Source workspace ID for cloning dashboard tiles
 """
 
 import os
@@ -62,23 +72,31 @@ CLIENT_ID           = os.environ["CLIENT_ID"]
 CLIENT_SECRET       = os.environ["CLIENT_SECRET"]
 TARGET_WORKSPACE_ID = os.environ["TARGET_WORKSPACE_ID"]
 
-FABRIC_BASE  = "https://api.fabric.microsoft.com/v1"
-FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
-AUTH_URL     = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+FABRIC_BASE   = "https://api.fabric.microsoft.com/v1"
+POWERBI_BASE  = "https://api.powerbi.com/v1.0/myorg"
+FABRIC_SCOPE  = "https://api.fabric.microsoft.com/.default"
+POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+AUTH_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
 SOURCE_ROOT  = pathlib.Path("workspace")
 
 # Optional: selective deploy mode
 DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()
 
+# Optional: source workspace for cloning dashboard tiles
+SOURCE_WORKSPACE_ID = os.environ.get("SOURCE_WORKSPACE_ID", "").strip()
+
 # Item types that have no deployable definition – skip them entirely
 NO_DEPLOY_TYPES = {
     "SQLAnalyticsEndpoint",  # auto-generated from Lakehouse; cannot be deployed
     "SQLEndpoint",           # variant name for the same auto-generated endpoint
-    "Dashboard",             # service-only; no source definition
     "MountedWarehouse",
     "MountedDataFactory",
 }
+
+# Item types deployed via the Power BI REST API instead of the Fabric
+# definition API.
+POWERBI_API_TYPES = {"Dashboard"}
 
 # Map of lower-cased item type to the definition format string the API
 # requires when uploading parts.  Types not listed here omit the format
@@ -117,14 +135,14 @@ POLL_MAX      = 72   # 72 × 5 s = 6 min max per item
 # Authentication
 # ---------------------------------------------------------------------------
 
-def get_access_token() -> str:
+def get_access_token(scope: str = FABRIC_SCOPE) -> str:
     resp = requests.post(
         AUTH_URL,
         data={
             "grant_type":    "client_credentials",
             "client_id":     CLIENT_ID,
             "client_secret": CLIENT_SECRET,
-            "scope":         FABRIC_SCOPE,
+            "scope":         scope,
         },
         timeout=30,
     )
@@ -476,6 +494,185 @@ def delete_item(session: requests.Session, item_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Power BI REST API – Dashboard deployment
+# ---------------------------------------------------------------------------
+
+def _read_dashboard_json(item_dir: pathlib.Path) -> dict | None:
+    """Read and parse the local dashboard.json file."""
+    path = item_dir / "dashboard.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _create_pbi_dashboard(
+    session_pbi: requests.Session,
+    display_name: str,
+) -> str:
+    """Create a new empty dashboard via Power BI API and return its ID."""
+    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards"
+    resp = session_pbi.post(url, json={"name": display_name}, timeout=60)
+    resp.raise_for_status()
+    return resp.json().get("id", "")
+
+
+def _delete_pbi_dashboard(
+    session_pbi: requests.Session,
+    dashboard_id: str,
+) -> None:
+    """Delete a dashboard via the Power BI API."""
+    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards/{dashboard_id}"
+    resp = session_pbi.delete(url, timeout=60)
+    if resp.status_code == 404:
+        return
+    resp.raise_for_status()
+
+
+def _list_target_dashboard_tiles(
+    session_pbi: requests.Session,
+    dashboard_id: str,
+) -> list[dict]:
+    """List existing tiles on a dashboard in the target workspace."""
+    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards/{dashboard_id}/tiles"
+    resp = session_pbi.get(url, timeout=60)
+    if resp.status_code in (400, 404):
+        return []
+    resp.raise_for_status()
+    return resp.json().get("value", [])
+
+
+def _clone_tiles_from_source(
+    session_pbi: requests.Session,
+    dashboard_data: dict,
+    target_dashboard_id: str,
+) -> int:
+    """Clone tiles from the source workspace dashboard to the target.
+
+    Resolves report and dataset references by name so that tiles are
+    correctly bound to the corresponding items in the target workspace.
+
+    Returns the number of tiles successfully cloned.
+    """
+    source_dashboard_id = dashboard_data.get("id", "")
+    source_tiles = dashboard_data.get("tiles", [])
+    if not source_tiles or not source_dashboard_id:
+        print("      No tiles to clone")
+        return 0
+
+    # Build name-based maps so tile bindings can be rewritten for the target.
+    # Source: id -> name (lower)   Target: name (lower) -> id
+    def _list_reports(workspace_id: str) -> list[dict]:
+        url = f"{POWERBI_BASE}/groups/{workspace_id}/reports"
+        r = session_pbi.get(url, timeout=60)
+        return r.json().get("value", []) if r.ok else []
+
+    def _list_datasets(workspace_id: str) -> list[dict]:
+        url = f"{POWERBI_BASE}/groups/{workspace_id}/datasets"
+        r = session_pbi.get(url, timeout=60)
+        return r.json().get("value", []) if r.ok else []
+
+    src_reports  = {r["id"]: r["name"].lower() for r in _list_reports(SOURCE_WORKSPACE_ID)  if "id" in r and "name" in r}
+    src_datasets = {d["id"]: d["name"].lower() for d in _list_datasets(SOURCE_WORKSPACE_ID) if "id" in d and "name" in d}
+    tgt_reports  = {r["name"].lower(): r["id"] for r in _list_reports(TARGET_WORKSPACE_ID)  if "name" in r}
+    tgt_datasets = {d["name"].lower(): d["id"] for d in _list_datasets(TARGET_WORKSPACE_ID) if "name" in d}
+
+    cloned = 0
+    for tile in source_tiles:
+        tile_id    = tile.get("id", "")
+        tile_title = tile.get("title", tile_id[:8])
+
+        clone_body: dict = {
+            "targetDashboardId":     target_dashboard_id,
+            "targetWorkspaceId":     TARGET_WORKSPACE_ID,
+            "positionConflictAction": "Tail",
+        }
+
+        # Rebind report reference by name
+        src_report_id = tile.get("reportId", "")
+        if src_report_id and src_report_id in src_reports:
+            target_id = tgt_reports.get(src_reports[src_report_id])
+            if target_id:
+                clone_body["targetReportId"] = target_id
+
+        # Rebind dataset reference by name
+        src_dataset_id = tile.get("datasetId", "")
+        if src_dataset_id and src_dataset_id in src_datasets:
+            target_id = tgt_datasets.get(src_datasets[src_dataset_id])
+            if target_id:
+                clone_body["targetModelId"] = target_id
+
+        clone_url = (
+            f"{POWERBI_BASE}/groups/{SOURCE_WORKSPACE_ID}"
+            f"/dashboards/{source_dashboard_id}/tiles/{tile_id}/CloneTile"
+        )
+        try:
+            resp = session_pbi.post(clone_url, json=clone_body, timeout=60)
+            if resp.status_code in (400, 404):
+                try:
+                    err_msg = resp.json().get("error", {}).get("message", resp.text[:200])
+                except Exception:
+                    err_msg = resp.text[:200]
+                print(f"      WARNING: Could not clone tile '{tile_title}': {err_msg}")
+                continue
+            resp.raise_for_status()
+            cloned += 1
+            print(f"      \u2713 Cloned tile '{tile_title}'")
+        except Exception as exc:
+            print(f"      WARNING: Failed to clone tile '{tile_title}': {exc}")
+
+    if cloned:
+        print(f"    {cloned}/{len(source_tiles)} tile(s) cloned")
+    return cloned
+
+
+def deploy_dashboard(
+    session_pbi: requests.Session,
+    display_name: str,
+    item_dir: pathlib.Path,
+    existing_id: str | None,
+) -> tuple[str, str]:
+    """Deploy a dashboard: create if needed, clone tiles for new/empty dashboards.
+
+    Returns (action, dashboard_id) where action is one of:
+        'created'  - new dashboard was created
+        'updated'  - tiles were cloned into an existing empty dashboard
+        'skipped'  - dashboard already exists and has tiles
+    """
+    dashboard_data = _read_dashboard_json(item_dir)
+
+    if existing_id:
+        # Dashboard exists: only attempt tile cloning if it is currently empty
+        if not SOURCE_WORKSPACE_ID or not dashboard_data:
+            print(f"    OK \u2013 already exists ({existing_id})")
+            return ("skipped", existing_id)
+
+        current_tiles = _list_target_dashboard_tiles(session_pbi, existing_id)
+        if current_tiles:
+            print(f"    OK \u2013 already exists with {len(current_tiles)} tile(s)")
+            return ("skipped", existing_id)
+
+        print(f"    Dashboard exists but has no tiles \u2013 cloning from source \u2026")
+        cloned = _clone_tiles_from_source(session_pbi, dashboard_data, existing_id)
+        return ("updated" if cloned else "skipped", existing_id)
+
+    # Create new dashboard
+    print("    Creating new dashboard via Power BI API \u2026")
+    dashboard_id = _create_pbi_dashboard(session_pbi, display_name)
+    print(f"    \u2713 Created dashboard {dashboard_id}")
+
+    # Clone tiles if source workspace is available
+    if SOURCE_WORKSPACE_ID and dashboard_data:
+        _clone_tiles_from_source(session_pbi, dashboard_data, dashboard_id)
+    elif not SOURCE_WORKSPACE_ID and dashboard_data and dashboard_data.get("tiles"):
+        print("    \u2139 Set SOURCE_WORKSPACE_ID to clone tiles from the source workspace")
+
+    return ("created", dashboard_id)
+
+
+# ---------------------------------------------------------------------------
 # Directory scanner
 # ---------------------------------------------------------------------------
 
@@ -780,7 +977,15 @@ def main():
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     })
-    print("  OK")
+    print("  Fabric token  OK")
+
+    pbi_token   = get_access_token(POWERBI_SCOPE)
+    session_pbi = requests.Session()
+    session_pbi.headers.update({
+        "Authorization": f"Bearer {pbi_token}",
+        "Content-Type":  "application/json",
+    })
+    print("  Power BI token  OK")
 
     # ── 2. Inventory target workspace ────────────────────────────────────────
     step = "[2/3]" if selective else "[2/4]"
@@ -823,6 +1028,24 @@ def main():
         lookup_key = (display_name.lower(), item_type.lower())
         repo_keys.add(lookup_key)
         existing_id = existing.get(lookup_key)
+
+        # ── Dashboard / Power BI API types ────────────────────────────────
+        if item_type in POWERBI_API_TYPES:
+            try:
+                action, dash_id = deploy_dashboard(
+                    session_pbi, display_name, item_dir, existing_id,
+                )
+                if action == "created":
+                    existing[lookup_key] = dash_id
+                    results["created"] += 1
+                elif action == "updated":
+                    results["deployed"] += 1
+                else:
+                    results["skipped"] += 1
+            except Exception as exc:
+                print(f"    ERROR – {exc}")
+                results["errors"] += 1
+            continue
 
         # ── Metadata-only types (Lakehouse, Environment, …) ──────────────
         # These cannot be updated via the definition API and cannot be safely
@@ -898,7 +1121,10 @@ def main():
             if ws_key not in repo_keys:
                 print(f"  [{ws_type}]  {ws_name}")
                 try:
-                    delete_item(session, ws_id)
+                    if ws_type in POWERBI_API_TYPES:
+                        _delete_pbi_dashboard(session_pbi, ws_id)
+                    else:
+                        delete_item(session, ws_id)
                     print(f"    ✓ Deleted  {ws_id}")
                     results["deleted"] += 1
                 except Exception as exc:
