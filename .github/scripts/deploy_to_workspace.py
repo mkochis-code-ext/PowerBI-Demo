@@ -36,12 +36,19 @@ excluded from the parts list sent to the API.
 
 Dashboard deployment
 --------------------
-Dashboards cannot be created through the Fabric definition API, so they
-are handled via the Power BI REST API instead.  An empty dashboard is
-created when it does not already exist.  If ``SOURCE_WORKSPACE_ID`` is
-set, tiles are cloned from the source dashboard and rebound to the
-corresponding reports / datasets in the target workspace (matched by
-name).
+Dashboards cannot be managed through the Fabric definition API, and the
+Power BI REST API does not expose a "create tile" endpoint — tiles can
+only be created interactively (pin from a report) or via CloneTile.
+
+The deploy strategy for dashboards is:
+  1. Create the dashboard in the target workspace if it does not exist.
+  2. Compare the desired tile state from Git (dashboard.json) with the
+     live tiles in the target workspace.
+  3. Report tile drift: missing tiles, extra tiles, and changed tiles.
+  4. For missing tiles, log the exact report/dataset name so the user
+     knows what to pin.  After this one-time manual step the dashboard is
+     fully maintained — subsequent deploys of reports/datasets from Git
+     keep the pinned tiles up-to-date automatically.
 
 Expected environment variables
 -------------------------------
@@ -50,7 +57,6 @@ CLIENT_ID            – Service Principal application (client) ID
 CLIENT_SECRET        – Service Principal client secret
 TARGET_WORKSPACE_ID  – PowerBI workspace ID to deploy into
 DEPLOY_ITEM          – (optional) <DisplayName>.<ItemType> to selectively deploy
-SOURCE_WORKSPACE_ID  – (optional) Source workspace ID for cloning dashboard tiles
 """
 
 import os
@@ -82,9 +88,6 @@ SOURCE_ROOT  = pathlib.Path("workspace")
 
 # Optional: selective deploy mode
 DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()
-
-# Optional: source workspace for cloning dashboard tiles
-SOURCE_WORKSPACE_ID = os.environ.get("SOURCE_WORKSPACE_ID", "").strip()
 
 # Item types that have no deployable definition – skip them entirely
 NO_DEPLOY_TYPES = {
@@ -494,7 +497,7 @@ def delete_item(session: requests.Session, item_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Power BI REST API – Dashboard deployment
+# Dashboard deployment (Git-based with tile drift detection)
 # ---------------------------------------------------------------------------
 
 def _read_dashboard_json(item_dir: pathlib.Path) -> dict | None:
@@ -531,11 +534,26 @@ def _delete_pbi_dashboard(
     resp.raise_for_status()
 
 
-def _list_target_dashboard_tiles(
+def _get_live_dashboard_id(
+    session_pbi: requests.Session,
+    display_name: str,
+) -> str | None:
+    """Find a dashboard by display name in the target workspace and return its ID."""
+    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards"
+    resp = session_pbi.get(url, timeout=60)
+    if not resp.ok:
+        return None
+    for dash in resp.json().get("value", []):
+        if dash.get("displayName", "").lower() == display_name.lower():
+            return dash.get("id", "")
+    return None
+
+
+def _get_live_tiles(
     session_pbi: requests.Session,
     dashboard_id: str,
 ) -> list[dict]:
-    """List existing tiles on a dashboard in the target workspace."""
+    """Fetch current tiles for a live dashboard."""
     url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards/{dashboard_id}/tiles"
     resp = session_pbi.get(url, timeout=60)
     if resp.status_code in (400, 404):
@@ -544,102 +562,77 @@ def _list_target_dashboard_tiles(
     return resp.json().get("value", [])
 
 
-def _clone_tiles_from_source(
+def _tile_signature(tile: dict) -> str:
+    """Build a comparison key for a tile based on its report/dataset binding."""
+    return (
+        f"report={tile.get('reportName', tile.get('reportId', ''))}|"
+        f"dataset={tile.get('datasetName', tile.get('datasetId', ''))}|"
+        f"title={tile.get('title', '')}"
+    ).lower()
+
+
+def _match_live_tile_to_desired(
+    live_tile: dict,
+    live_report_id_to_name: dict[str, str],
+    live_dataset_id_to_name: dict[str, str],
+) -> str:
+    """Build the same signature for a live tile after resolving IDs to names."""
+    report_name = live_report_id_to_name.get(live_tile.get("reportId", ""), "")
+    dataset_name = live_dataset_id_to_name.get(live_tile.get("datasetId", ""), "")
+    return (
+        f"report={report_name}|"
+        f"dataset={dataset_name}|"
+        f"title={live_tile.get('title', '')}"
+    ).lower()
+
+
+def _detect_tile_drift(
     session_pbi: requests.Session,
-    dashboard_data: dict,
-    target_dashboard_id: str,
-    source_workspace_id: str,
-) -> int:
-    """Clone tiles from the source workspace dashboard to the target.
+    dashboard_id: str,
+    desired_tiles: list[dict],
+) -> dict:
+    """Compare desired tiles from Git with live tiles in the target workspace.
 
-    Resolves report and dataset references by name so that tiles are
-    correctly bound to the corresponding items in the target workspace.
-
-    Returns the number of tiles successfully cloned.
+    Returns a dict with 'matching', 'missing', 'extra' tile lists.
     """
-    source_dashboard_id = dashboard_data.get("id", "")
-    source_tiles = dashboard_data.get("tiles", [])
-    if not source_tiles or not source_dashboard_id:
-        print("      No tiles to clone")
-        return 0
+    live_tiles = _get_live_tiles(session_pbi, dashboard_id)
 
-    print(f"      Cloning {len(source_tiles)} tile(s) from workspace {source_workspace_id}")
+    # Build id→name maps for the live workspace
+    live_report_ids: dict[str, str] = {}
+    live_dataset_ids: dict[str, str] = {}
 
-    # Build name-based maps so tile bindings can be rewritten for the target.
-    # Source: id -> name (lower)   Target: name (lower) -> id
-    def _list_reports(workspace_id: str) -> list[dict]:
-        url = f"{POWERBI_BASE}/groups/{workspace_id}/reports"
-        r = session_pbi.get(url, timeout=60)
-        return r.json().get("value", []) if r.ok else []
+    r = session_pbi.get(f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/reports", timeout=60)
+    if r.ok:
+        for rpt in r.json().get("value", []):
+            live_report_ids[rpt["id"]] = rpt.get("name", "").lower()
 
-    def _list_datasets(workspace_id: str) -> list[dict]:
-        url = f"{POWERBI_BASE}/groups/{workspace_id}/datasets"
-        r = session_pbi.get(url, timeout=60)
-        return r.json().get("value", []) if r.ok else []
+    r = session_pbi.get(f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/datasets", timeout=60)
+    if r.ok:
+        for ds in r.json().get("value", []):
+            live_dataset_ids[ds["id"]] = ds.get("name", "").lower()
 
-    src_reports  = {r["id"]: r["name"].lower() for r in _list_reports(source_workspace_id)  if "id" in r and "name" in r}
-    src_datasets = {d["id"]: d["name"].lower() for d in _list_datasets(source_workspace_id) if "id" in d and "name" in d}
-    tgt_reports  = {r["name"].lower(): r["id"] for r in _list_reports(TARGET_WORKSPACE_ID)  if "name" in r}
-    tgt_datasets = {d["name"].lower(): d["id"] for d in _list_datasets(TARGET_WORKSPACE_ID) if "name" in d}
+    # Build signature sets
+    desired_sigs = {_tile_signature(t): t for t in desired_tiles}
+    live_sigs = {
+        _match_live_tile_to_desired(t, live_report_ids, live_dataset_ids): t
+        for t in live_tiles
+    }
 
-    cloned = 0
-    for tile in source_tiles:
-        tile_id    = tile.get("id", "")
-        tile_title = tile.get("title", tile_id[:8])
+    matching = []
+    missing = []
+    extra = []
 
-        clone_body: dict = {
-            "targetDashboardId":     target_dashboard_id,
-            "targetWorkspaceId":     TARGET_WORKSPACE_ID,
-            "positionConflictAction": "Tail",
-        }
+    for sig, tile in desired_sigs.items():
+        if sig in live_sigs:
+            matching.append(tile)
+        else:
+            missing.append(tile)
 
-        # Rebind report reference by name
-        src_report_id = tile.get("reportId", "")
-        if src_report_id and src_report_id in src_reports:
-            target_id = tgt_reports.get(src_reports[src_report_id])
-            if target_id:
-                clone_body["targetReportId"] = target_id
+    for sig, tile in live_sigs.items():
+        if sig not in desired_sigs:
+            extra.append(tile)
 
-        # Rebind dataset reference by name
-        src_dataset_id = tile.get("datasetId", "")
-        if src_dataset_id and src_dataset_id in src_datasets:
-            target_id = tgt_datasets.get(src_datasets[src_dataset_id])
-            if target_id:
-                clone_body["targetModelId"] = target_id
-
-        clone_url = (
-            f"{POWERBI_BASE}/groups/{source_workspace_id}"
-            f"/dashboards/{source_dashboard_id}/tiles/{tile_id}/CloneTile"
-        )
-        try:
-            resp = session_pbi.post(clone_url, json=clone_body, timeout=60)
-            if resp.status_code in (400, 404):
-                try:
-                    err_body = resp.json()
-                    err_msg = (err_body.get("error", {}).get("message")
-                               or err_body.get("message")
-                               or resp.text[:200])
-                except Exception:
-                    err_msg = resp.text[:200]
-                print(f"      WARNING: Could not clone tile '{tile_title}': {err_msg}")
-                continue
-            resp.raise_for_status()
-            cloned += 1
-            print(f"      \u2713 Cloned tile '{tile_title}'")
-        except Exception as exc:
-            print(f"      WARNING: Failed to clone tile '{tile_title}': {exc}")
-
-    print(f"    {cloned}/{len(source_tiles)} tile(s) cloned successfully")
-    return cloned
-
-
-def _resolve_source_workspace(dashboard_data: dict | None) -> str:
-    """Return the source workspace ID from env var or dashboard.json fallback."""
-    if SOURCE_WORKSPACE_ID:
-        return SOURCE_WORKSPACE_ID
-    if dashboard_data:
-        return dashboard_data.get("sourceWorkspaceId", "")
-    return ""
+    return {"matching": matching, "missing": missing, "extra": extra}
 
 
 def deploy_dashboard(
@@ -648,51 +641,86 @@ def deploy_dashboard(
     item_dir: pathlib.Path,
     existing_id: str | None,
 ) -> tuple[str, str]:
-    """Deploy a dashboard: create if needed, clone tiles for new/empty dashboards.
+    """Deploy a dashboard from Git with tile drift detection.
+
+    Strategy:
+      1. Create the dashboard if it does not exist.
+      2. Compare desired tile state (from dashboard.json in Git) with
+         live tiles in the target workspace.
+      3. Report tile drift with actionable details.
 
     Returns (action, dashboard_id) where action is one of:
         'created'  - new dashboard was created
-        'updated'  - tiles were cloned into an existing empty dashboard
-        'skipped'  - dashboard already exists and has tiles
+        'deployed' - dashboard exists and tiles are in sync
+        'drifted'  - dashboard exists but tiles differ from Git
+        'skipped'  - dashboard exists with no tile data to compare
     """
     dashboard_data = _read_dashboard_json(item_dir)
-    source_ws = _resolve_source_workspace(dashboard_data)
+    desired_tiles = dashboard_data.get("tiles", []) if dashboard_data else []
 
-    if not source_ws:
-        if not existing_id:
-            print("    Creating new dashboard via Power BI API \u2026")
-            dashboard_id = _create_pbi_dashboard(session_pbi, display_name)
-            print(f"    \u2713 Created dashboard {dashboard_id}  (empty \u2013 no source workspace to clone tiles from)")
-            print("    \u2139 Set SOURCE_WORKSPACE_ID or re-sync to populate sourceWorkspaceId in dashboard.json")
-            return ("created", dashboard_id)
-        print(f"    OK \u2013 already exists ({existing_id}), no source workspace for tile cloning")
-        return ("skipped", existing_id)
+    # ── Resolve the live Power BI dashboard ID ───────────────────────────
+    # The Fabric item ID (existing_id) is not always the same as the
+    # Power BI dashboard ID, so look it up by name.
+    live_dash_id = _get_live_dashboard_id(session_pbi, display_name)
 
-    if existing_id:
-        # Dashboard exists: only attempt tile cloning if it is currently empty
-        if not dashboard_data:
-            print(f"    OK \u2013 already exists ({existing_id})")
-            return ("skipped", existing_id)
+    if not live_dash_id and not existing_id:
+        # Brand new dashboard
+        print("    Creating new dashboard via Power BI API …")
+        live_dash_id = _create_pbi_dashboard(session_pbi, display_name)
+        print(f"    ✓ Created dashboard {live_dash_id}")
 
-        current_tiles = _list_target_dashboard_tiles(session_pbi, existing_id)
-        if current_tiles:
-            print(f"    OK \u2013 already exists with {len(current_tiles)} tile(s)")
-            return ("skipped", existing_id)
+        if desired_tiles:
+            print(f"    ⚠ {len(desired_tiles)} tile(s) need to be pinned manually:")
+            for i, tile in enumerate(desired_tiles, 1):
+                t_title  = tile.get("title", "(untitled)")
+                t_report = tile.get("reportName", tile.get("reportId", "n/a"))
+                t_dataset = tile.get("datasetName", tile.get("datasetId", "n/a"))
+                print(f"      {i}. \"{t_title}\"  ←  report: {t_report}  |  dataset: {t_dataset}")
+            print("      Pin these visuals from their reports in the Power BI portal.")
+            print("      Once pinned, subsequent deploys will track tile drift automatically.")
+        return ("created", live_dash_id)
 
-        print(f"    Dashboard exists but has no tiles \u2013 cloning from source \u2026")
-        cloned = _clone_tiles_from_source(session_pbi, dashboard_data, existing_id, source_ws)
-        return ("updated" if cloned else "skipped", existing_id)
+    # ── Dashboard exists – compare tile state ────────────────────────────
+    dash_id = live_dash_id or existing_id or ""
+    if not desired_tiles:
+        print(f"    OK – dashboard exists ({dash_id}), no tile data in Git to compare")
+        return ("skipped", dash_id)
 
-    # Create new dashboard
-    print("    Creating new dashboard via Power BI API \u2026")
-    dashboard_id = _create_pbi_dashboard(session_pbi, display_name)
-    print(f"    \u2713 Created dashboard {dashboard_id}")
+    if not live_dash_id:
+        # Fabric knows the item but PBI API can't find the dashboard
+        print(f"    OK – Fabric item exists ({existing_id}) but not visible via Power BI API")
+        return ("skipped", existing_id or "")
 
-    # Clone tiles from source
-    if dashboard_data:
-        _clone_tiles_from_source(session_pbi, dashboard_data, dashboard_id, source_ws)
+    print(f"    Comparing tiles: Git ({len(desired_tiles)}) vs live …")
+    drift = _detect_tile_drift(session_pbi, live_dash_id, desired_tiles)
+    n_match   = len(drift["matching"])
+    n_missing = len(drift["missing"])
+    n_extra   = len(drift["extra"])
 
-    return ("created", dashboard_id)
+    if n_missing == 0 and n_extra == 0:
+        print(f"    ✓ All {n_match} tile(s) match Git – no drift detected")
+        return ("deployed", dash_id)
+
+    # Report drift details
+    action = "drifted"
+    print(f"    ⚠ Tile drift detected: {n_match} matching, {n_missing} missing, {n_extra} extra")
+
+    if drift["missing"]:
+        print("    Missing tiles (in Git but not in workspace):")
+        for tile in drift["missing"]:
+            t_title  = tile.get("title", "(untitled)")
+            t_report = tile.get("reportName", tile.get("reportId", "n/a"))
+            t_dataset = tile.get("datasetName", tile.get("datasetId", "n/a"))
+            print(f"      • \"{t_title}\"  ←  report: {t_report}  |  dataset: {t_dataset}")
+        print("      Pin these from their reports in the Power BI portal.")
+
+    if drift["extra"]:
+        print("    Extra tiles (in workspace but not in Git):")
+        for tile in drift["extra"]:
+            print(f"      • \"{tile.get('title', '(untitled)')}\"  (id: {tile.get('id', 'n/a')})")
+        print("      Remove these in the Power BI portal if they are unwanted.")
+
+    return (action, dash_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,6 +1068,10 @@ def main():
     else:
         ordered_items = list(iter_item_dirs(SOURCE_ROOT))
 
+    # Ensure dashboards are deployed after other items so that the
+    # reports / datasets they depend on are already in the target workspace.
+    ordered_items.sort(key=lambda x: 1 if x[1] in POWERBI_API_TYPES else 0)
+
     for display_name, item_type, item_dir in ordered_items:
         print(f"\n  [{item_type}]  {display_name}")
 
@@ -1061,7 +1093,7 @@ def main():
                 if action == "created":
                     existing[lookup_key] = dash_id
                     results["created"] += 1
-                elif action == "updated":
+                elif action in ("deployed", "drifted"):
                     results["deployed"] += 1
                 else:
                     results["skipped"] += 1

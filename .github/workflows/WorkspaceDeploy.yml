@@ -89,12 +89,11 @@ jobs:
 
       - name: Deploy workspace/ contents to TEST workspace
         env:
-          TENANT_ID:            ${{ secrets.POWERBI_TENANT_ID }}
-          CLIENT_ID:            ${{ secrets.POWERBI_CLIENT_ID }}
-          CLIENT_SECRET:        ${{ secrets.POWERBI_CLIENT_SECRET }}
-          TARGET_WORKSPACE_ID:  ${{ secrets.POWERBI_TEST_WORKSPACE_ID }}
-          SOURCE_WORKSPACE_ID:  ${{ secrets.POWERBI_WORKSPACE_ID }}
-          DEPLOY_ITEM:          ${{ inputs.item }}
+          TENANT_ID:           ${{ secrets.POWERBI_TENANT_ID }}
+          CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
+          CLIENT_SECRET:       ${{ secrets.POWERBI_CLIENT_SECRET }}
+          TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_TEST_WORKSPACE_ID }}
+          DEPLOY_ITEM:         ${{ inputs.item }}
         run: |
           echo "Deploying branch '${{ inputs.branch || 'dev' }}' (${{ needs.resolve-commit.outputs.sha }}) → PowerBI-TEST"
           python .github/scripts/deploy_to_workspace.py
@@ -143,12 +142,11 @@ jobs:
 
       - name: Deploy workspace/ contents to PROD workspace
         env:
-          TENANT_ID:            ${{ secrets.POWERBI_TENANT_ID }}
-          CLIENT_ID:            ${{ secrets.POWERBI_CLIENT_ID }}
-          CLIENT_SECRET:        ${{ secrets.POWERBI_CLIENT_SECRET }}
-          TARGET_WORKSPACE_ID:  ${{ secrets.POWERBI_PROD_WORKSPACE_ID }}
-          SOURCE_WORKSPACE_ID:  ${{ secrets.POWERBI_WORKSPACE_ID }}
-          DEPLOY_ITEM:          ${{ inputs.item }}
+          TENANT_ID:           ${{ secrets.POWERBI_TENANT_ID }}
+          CLIENT_ID:           ${{ secrets.POWERBI_CLIENT_ID }}
+          CLIENT_SECRET:       ${{ secrets.POWERBI_CLIENT_SECRET }}
+          TARGET_WORKSPACE_ID: ${{ secrets.POWERBI_PROD_WORKSPACE_ID }}
+          DEPLOY_ITEM:         ${{ inputs.item }}
         run: |
           echo "Deploying branch '${{ inputs.branch || 'dev' }}' (${{ needs.resolve-commit.outputs.sha }}) → PowerBI-PROD"
           python .github/scripts/deploy_to_workspace.py

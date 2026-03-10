@@ -194,6 +194,11 @@ def get_dashboard_definition(
 ) -> dict | None:
     """Fetch dashboard metadata and tiles from the Power BI REST API.
 
+    Tile references (reportId, datasetId) are resolved to human-readable
+    names so that dashboard.json is self-contained and workspace-independent.
+    This enables Git-based deployment to any workspace without depending on
+    the original workspace still being in the same state.
+
     Returns a synthetic 'definition' dict with a 'parts' list so the
     existing save_definition() logic can write the file to disk.
     """
@@ -214,13 +219,45 @@ def get_dashboard_definition(
     elif tiles_resp.status_code not in (400, 404):
         tiles_resp.raise_for_status()
 
+    # Resolve report and dataset IDs to names so the definition is portable
+    report_names: dict[str, str] = {}
+    dataset_names: dict[str, str] = {}
+    for tile in tiles:
+        for rid_key, cache in (("reportId", report_names), ("datasetId", dataset_names)):
+            rid = tile.get(rid_key, "")
+            if rid and rid not in cache:
+                cache[rid] = ""  # placeholder
+
+    # Batch-resolve reports
+    if report_names:
+        r = session_pbi.get(f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/reports", timeout=60)
+        if r.ok:
+            for rpt in r.json().get("value", []):
+                if rpt.get("id") in report_names:
+                    report_names[rpt["id"]] = rpt.get("name", "")
+
+    # Batch-resolve datasets
+    if dataset_names:
+        r = session_pbi.get(f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/datasets", timeout=60)
+        if r.ok:
+            for ds in r.json().get("value", []):
+                if ds.get("id") in dataset_names:
+                    dataset_names[ds["id"]] = ds.get("name", "")
+
+    # Enrich tiles with resolved names
+    for tile in tiles:
+        rid = tile.get("reportId", "")
+        if rid and rid in report_names:
+            tile["reportName"] = report_names[rid]
+        did = tile.get("datasetId", "")
+        if did and did in dataset_names:
+            tile["datasetName"] = dataset_names[did]
+
     dashboard_json = {
-        "id":               dashboard_meta.get("id", dashboard_id),
-        "displayName":      dashboard_meta.get("displayName", ""),
-        "isReadOnly":       dashboard_meta.get("isReadOnly", False),
-        "embedUrl":         dashboard_meta.get("embedUrl", ""),
-        "sourceWorkspaceId": WORKSPACE_ID,
-        "tiles":            tiles,
+        "id":          dashboard_meta.get("id", dashboard_id),
+        "displayName": dashboard_meta.get("displayName", ""),
+        "isReadOnly":  dashboard_meta.get("isReadOnly", False),
+        "tiles":       tiles,
     }
 
     payload = base64.b64encode(
