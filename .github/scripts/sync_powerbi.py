@@ -215,11 +215,12 @@ def get_dashboard_definition(
         tiles_resp.raise_for_status()
 
     dashboard_json = {
-        "id":          dashboard_meta.get("id", dashboard_id),
-        "displayName": dashboard_meta.get("displayName", ""),
-        "isReadOnly":  dashboard_meta.get("isReadOnly", False),
-        "embedUrl":    dashboard_meta.get("embedUrl", ""),
-        "tiles":       tiles,
+        "id":               dashboard_meta.get("id", dashboard_id),
+        "displayName":      dashboard_meta.get("displayName", ""),
+        "isReadOnly":       dashboard_meta.get("isReadOnly", False),
+        "embedUrl":         dashboard_meta.get("embedUrl", ""),
+        "sourceWorkspaceId": WORKSPACE_ID,
+        "tiles":            tiles,
     }
 
     payload = base64.b64encode(

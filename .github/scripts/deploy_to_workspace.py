@@ -548,6 +548,7 @@ def _clone_tiles_from_source(
     session_pbi: requests.Session,
     dashboard_data: dict,
     target_dashboard_id: str,
+    source_workspace_id: str,
 ) -> int:
     """Clone tiles from the source workspace dashboard to the target.
 
@@ -562,6 +563,8 @@ def _clone_tiles_from_source(
         print("      No tiles to clone")
         return 0
 
+    print(f"      Cloning {len(source_tiles)} tile(s) from workspace {source_workspace_id}")
+
     # Build name-based maps so tile bindings can be rewritten for the target.
     # Source: id -> name (lower)   Target: name (lower) -> id
     def _list_reports(workspace_id: str) -> list[dict]:
@@ -574,8 +577,8 @@ def _clone_tiles_from_source(
         r = session_pbi.get(url, timeout=60)
         return r.json().get("value", []) if r.ok else []
 
-    src_reports  = {r["id"]: r["name"].lower() for r in _list_reports(SOURCE_WORKSPACE_ID)  if "id" in r and "name" in r}
-    src_datasets = {d["id"]: d["name"].lower() for d in _list_datasets(SOURCE_WORKSPACE_ID) if "id" in d and "name" in d}
+    src_reports  = {r["id"]: r["name"].lower() for r in _list_reports(source_workspace_id)  if "id" in r and "name" in r}
+    src_datasets = {d["id"]: d["name"].lower() for d in _list_datasets(source_workspace_id) if "id" in d and "name" in d}
     tgt_reports  = {r["name"].lower(): r["id"] for r in _list_reports(TARGET_WORKSPACE_ID)  if "name" in r}
     tgt_datasets = {d["name"].lower(): d["id"] for d in _list_datasets(TARGET_WORKSPACE_ID) if "name" in d}
 
@@ -605,14 +608,17 @@ def _clone_tiles_from_source(
                 clone_body["targetModelId"] = target_id
 
         clone_url = (
-            f"{POWERBI_BASE}/groups/{SOURCE_WORKSPACE_ID}"
+            f"{POWERBI_BASE}/groups/{source_workspace_id}"
             f"/dashboards/{source_dashboard_id}/tiles/{tile_id}/CloneTile"
         )
         try:
             resp = session_pbi.post(clone_url, json=clone_body, timeout=60)
             if resp.status_code in (400, 404):
                 try:
-                    err_msg = resp.json().get("error", {}).get("message", resp.text[:200])
+                    err_body = resp.json()
+                    err_msg = (err_body.get("error", {}).get("message")
+                               or err_body.get("message")
+                               or resp.text[:200])
                 except Exception:
                     err_msg = resp.text[:200]
                 print(f"      WARNING: Could not clone tile '{tile_title}': {err_msg}")
@@ -623,9 +629,17 @@ def _clone_tiles_from_source(
         except Exception as exc:
             print(f"      WARNING: Failed to clone tile '{tile_title}': {exc}")
 
-    if cloned:
-        print(f"    {cloned}/{len(source_tiles)} tile(s) cloned")
+    print(f"    {cloned}/{len(source_tiles)} tile(s) cloned successfully")
     return cloned
+
+
+def _resolve_source_workspace(dashboard_data: dict | None) -> str:
+    """Return the source workspace ID from env var or dashboard.json fallback."""
+    if SOURCE_WORKSPACE_ID:
+        return SOURCE_WORKSPACE_ID
+    if dashboard_data:
+        return dashboard_data.get("sourceWorkspaceId", "")
+    return ""
 
 
 def deploy_dashboard(
@@ -642,10 +656,21 @@ def deploy_dashboard(
         'skipped'  - dashboard already exists and has tiles
     """
     dashboard_data = _read_dashboard_json(item_dir)
+    source_ws = _resolve_source_workspace(dashboard_data)
+
+    if not source_ws:
+        if not existing_id:
+            print("    Creating new dashboard via Power BI API \u2026")
+            dashboard_id = _create_pbi_dashboard(session_pbi, display_name)
+            print(f"    \u2713 Created dashboard {dashboard_id}  (empty \u2013 no source workspace to clone tiles from)")
+            print("    \u2139 Set SOURCE_WORKSPACE_ID or re-sync to populate sourceWorkspaceId in dashboard.json")
+            return ("created", dashboard_id)
+        print(f"    OK \u2013 already exists ({existing_id}), no source workspace for tile cloning")
+        return ("skipped", existing_id)
 
     if existing_id:
         # Dashboard exists: only attempt tile cloning if it is currently empty
-        if not SOURCE_WORKSPACE_ID or not dashboard_data:
+        if not dashboard_data:
             print(f"    OK \u2013 already exists ({existing_id})")
             return ("skipped", existing_id)
 
@@ -655,7 +680,7 @@ def deploy_dashboard(
             return ("skipped", existing_id)
 
         print(f"    Dashboard exists but has no tiles \u2013 cloning from source \u2026")
-        cloned = _clone_tiles_from_source(session_pbi, dashboard_data, existing_id)
+        cloned = _clone_tiles_from_source(session_pbi, dashboard_data, existing_id, source_ws)
         return ("updated" if cloned else "skipped", existing_id)
 
     # Create new dashboard
@@ -663,11 +688,9 @@ def deploy_dashboard(
     dashboard_id = _create_pbi_dashboard(session_pbi, display_name)
     print(f"    \u2713 Created dashboard {dashboard_id}")
 
-    # Clone tiles if source workspace is available
-    if SOURCE_WORKSPACE_ID and dashboard_data:
-        _clone_tiles_from_source(session_pbi, dashboard_data, dashboard_id)
-    elif not SOURCE_WORKSPACE_ID and dashboard_data and dashboard_data.get("tiles"):
-        print("    \u2139 Set SOURCE_WORKSPACE_ID to clone tiles from the source workspace")
+    # Clone tiles from source
+    if dashboard_data:
+        _clone_tiles_from_source(session_pbi, dashboard_data, dashboard_id, source_ws)
 
     return ("created", dashboard_id)
 
