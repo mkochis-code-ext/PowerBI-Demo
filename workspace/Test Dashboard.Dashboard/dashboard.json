@@ -2,7 +2,5 @@
   "id": "fdc62420-c6ba-4252-8925-d44d64d1b69e",
   "displayName": "Test Dashboard",
   "isReadOnly": false,
-  "embedUrl": "https://app.powerbi.com/dashboardEmbed?dashboardId=fdc62420-c6ba-4252-8925-d44d64d1b69e&config=eyJjbHVzdGVyVXJsIjoiaHR0cHM6Ly9XQUJJLVdFU1QtVVMzLUEtUFJJTUFSWS1yZWRpcmVjdC5hbmFseXNpcy53aW5kb3dzLm5ldCIsImVtYmVkRmVhdHVyZXMiOnt9fQ%3d%3d",
-  "sourceWorkspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
   "tiles": []
 }
