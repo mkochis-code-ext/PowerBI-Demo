@@ -21,9 +21,10 @@ by the API.
   MLExperiment           MLExperiment.json  +  .platform
   Eventstream            eventstream.json  +  .platform
   SQLDatabase            SqlDatabase.json  +  .platform
+  Dashboard              dashboard.json  (metadata + tiles via Power BI API)
   … any other type that exposes a getDefinition endpoint …
 
-Items that do not expose getDefinition (e.g. SQLAnalyticsEndpoint, Dashboard)
+Items that do not expose getDefinition (e.g. SQLAnalyticsEndpoint)
 are skipped gracefully and recorded in workspace_manifest.json.
 
 Expected environment variables
@@ -54,10 +55,13 @@ CLIENT_SECRET = os.environ["CLIENT_SECRET"]
 WORKSPACE_ID  = os.environ["WORKSPACE_ID"]
 
 FABRIC_BASE   = "https://api.fabric.microsoft.com/v1"
+POWERBI_BASE  = "https://api.powerbi.com/v1.0/myorg"
 AUTH_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
 # Fabric scope covers all Fabric items including Semantic Models / Power BI
 FABRIC_SCOPE  = "https://api.fabric.microsoft.com/.default"
+# Power BI scope is required for dashboard-specific REST endpoints
+POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 
 OUTPUT_ROOT   = pathlib.Path("workspace")
 
@@ -66,10 +70,13 @@ OUTPUT_ROOT   = pathlib.Path("workspace")
 NO_DEFINITION_TYPES = {
     "SQLAnalyticsEndpoint",   # auto-generated from Lakehouse
     "SQLEndpoint",            # variant name for the same auto-generated endpoint
-    "Dashboard",              # service-only construct, no source file
     "MountedWarehouse",
     "MountedDataFactory",
 }
+
+# Item types that are fetched via the Power BI REST API instead of
+# the Fabric getDefinition endpoint.
+POWERBI_API_TYPES = {"Dashboard"}
 
 # Map of lower-cased item type to the definition format string the API
 # requires when downloading.  Types not listed here omit the format field,
@@ -175,6 +182,59 @@ def write_file(path: pathlib.Path, data: bytes) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Power BI REST API – Dashboards
+# ---------------------------------------------------------------------------
+
+def get_dashboard_definition(
+    session_pbi: requests.Session,
+    dashboard_id: str,
+) -> dict | None:
+    """Fetch dashboard metadata and tiles from the Power BI REST API.
+
+    Returns a synthetic 'definition' dict with a 'parts' list so the
+    existing save_definition() logic can write the file to disk.
+    """
+    # Dashboard metadata
+    url = f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/dashboards/{dashboard_id}"
+    resp = session_pbi.get(url, timeout=60)
+    if resp.status_code in (400, 404):
+        return None
+    resp.raise_for_status()
+    dashboard_meta = resp.json()
+
+    # Dashboard tiles
+    tiles_url = f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/dashboards/{dashboard_id}/tiles"
+    tiles_resp = session_pbi.get(tiles_url, timeout=60)
+    tiles = []
+    if tiles_resp.status_code == 200:
+        tiles = tiles_resp.json().get("value", [])
+    elif tiles_resp.status_code not in (400, 404):
+        tiles_resp.raise_for_status()
+
+    dashboard_json = {
+        "id":          dashboard_meta.get("id", dashboard_id),
+        "displayName": dashboard_meta.get("displayName", ""),
+        "isReadOnly":  dashboard_meta.get("isReadOnly", False),
+        "embedUrl":    dashboard_meta.get("embedUrl", ""),
+        "tiles":       tiles,
+    }
+
+    payload = base64.b64encode(
+        json.dumps(dashboard_json, indent=2, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+
+    return {
+        "parts": [
+            {
+                "path":        "dashboard.json",
+                "payloadType": "InlineBase64",
+                "payload":     payload,
+            }
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -419,17 +479,25 @@ def main():
     print(f"Output    : {OUTPUT_ROOT.resolve()}")
 
     # ── 1. Authenticate ─────────────────────────────────────────────────────────────────────
-    print("\n[1/3] Authenticating as Service Principal …")
+    print("\n[1/4] Authenticating as Service Principal …")
     token   = get_access_token(FABRIC_SCOPE)
     session = requests.Session()
     session.headers.update({
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     })
-    print("  OK")
+    print("  Fabric token  OK")
+
+    pbi_token   = get_access_token(POWERBI_SCOPE)
+    session_pbi = requests.Session()
+    session_pbi.headers.update({
+        "Authorization": f"Bearer {pbi_token}",
+        "Content-Type":  "application/json",
+    })
+    print("  Power BI token  OK")
 
     # ── 2. Discover items ────────────────────────────────────────────────────────────
-    print("\n[2/3] Discovering workspace items …")
+    print("\n[2/4] Discovering workspace items …")
     items = list_workspace_items(session)
     print(f"  Found {len(items)} item(s)")
 
@@ -441,7 +509,7 @@ def main():
         print(f"    {t:<40} {c}")
 
     # ── 3. Download source definitions ─────────────────────────────────────────────
-    print("\n[3/3] Downloading source definitions …")
+    print("\n[3/4] Downloading source definitions …")
     skipped: list = []
     total_files_written  = 0
     total_files_unchanged = 0
@@ -461,7 +529,10 @@ def main():
             continue
 
         try:
-            definition = get_item_definition(session, item_id, item_type)
+            if item_type in POWERBI_API_TYPES:
+                definition = get_dashboard_definition(session_pbi, item_id)
+            else:
+                definition = get_item_definition(session, item_id, item_type)
             if definition is None:
                 print("    SKIP – getDefinition not supported or returned nothing")
                 skipped.append({**item, "skipReason": "getDefinition returned nothing"})
@@ -479,6 +550,8 @@ def main():
             print(f"    ERROR – {exc}")
             skipped.append({**item, "skipReason": str(exc)})
 
+    # ── 4. Write manifest ──────────────────────────────────────────────────
+    print("\n[4/4] Writing manifest …")
     write_manifest(items, skipped)
 
     total_saved = len(items) - len(skipped)
