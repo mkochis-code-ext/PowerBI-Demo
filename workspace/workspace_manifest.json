@@ -1,17 +1,40 @@
 {
   "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-  "syncedAt": "2026-03-10T17:02:21Z",
-  "totalItems": 10,
-  "skippedCount": 2,
+  "syncedAt": "2026-03-10T19:50:32Z",
+  "totalItems": 13,
+  "skippedCount": 4,
   "byType": {
+    "Dashboard": 2,
     "Environment": 1,
     "Lakehouse": 1,
     "Notebook": 4,
+    "Report": 1,
     "SQLDatabase": 1,
     "SQLEndpoint": 2,
     "SemanticModel": 1
   },
   "items": [
+    {
+      "id": "fdc62420-c6ba-4252-8925-d44d64d1b69e",
+      "type": "Dashboard",
+      "displayName": "Test Dashboard",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb"
+    },
+    {
+      "id": "87796d65-38c6-48ea-9842-4e929d5a41fa",
+      "type": "Dashboard",
+      "displayName": "Demo Dashboard",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb"
+    },
+    {
+      "id": "0ff5a75a-5b34-4262-a4f3-e38b949e6e97",
+      "type": "Report",
+      "displayName": "Demo Report",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb"
+    },
     {
       "id": "30b43571-68e0-4c6d-ac75-a7970b3aea49",
       "type": "SemanticModel",
@@ -84,6 +107,22 @@
     }
   ],
   "skippedItems": [
+    {
+      "id": "fdc62420-c6ba-4252-8925-d44d64d1b69e",
+      "type": "Dashboard",
+      "displayName": "Test Dashboard",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
+      "skipReason": "no getDefinition support"
+    },
+    {
+      "id": "87796d65-38c6-48ea-9842-4e929d5a41fa",
+      "type": "Dashboard",
+      "displayName": "Demo Dashboard",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
+      "skipReason": "no getDefinition support"
+    },
     {
       "id": "1623fbb9-f8c8-4eb9-8259-f377130adf62",
       "type": "SQLEndpoint",
