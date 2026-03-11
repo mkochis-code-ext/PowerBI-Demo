@@ -21,7 +21,6 @@ by the API.
   MLExperiment           MLExperiment.json  +  .platform
   Eventstream            eventstream.json  +  .platform
   SQLDatabase            SqlDatabase.json  +  .platform
-  Dashboard              dashboard.json  (metadata + tiles via Power BI API)
   … any other type that exposes a getDefinition endpoint …
 
 Items that do not expose getDefinition (e.g. SQLAnalyticsEndpoint)
@@ -55,13 +54,10 @@ CLIENT_SECRET = os.environ["CLIENT_SECRET"]
 WORKSPACE_ID  = os.environ["WORKSPACE_ID"]
 
 FABRIC_BASE   = "https://api.fabric.microsoft.com/v1"
-POWERBI_BASE  = "https://api.powerbi.com/v1.0/myorg"
 AUTH_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
 # Fabric scope covers all Fabric items including Semantic Models / Power BI
 FABRIC_SCOPE  = "https://api.fabric.microsoft.com/.default"
-# Power BI scope is required for dashboard-specific REST endpoints
-POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 
 OUTPUT_ROOT   = pathlib.Path("workspace")
 
@@ -70,13 +66,10 @@ OUTPUT_ROOT   = pathlib.Path("workspace")
 NO_DEFINITION_TYPES = {
     "SQLAnalyticsEndpoint",   # auto-generated from Lakehouse
     "SQLEndpoint",            # variant name for the same auto-generated endpoint
+    "Dashboard",              # no Fabric definition API support; see README
     "MountedWarehouse",
     "MountedDataFactory",
 }
-
-# Item types that are fetched via the Power BI REST API instead of
-# the Fabric getDefinition endpoint.
-POWERBI_API_TYPES = {"Dashboard"}
 
 # Map of lower-cased item type to the definition format string the API
 # requires when downloading.  Types not listed here omit the format field,
@@ -182,97 +175,6 @@ def write_file(path: pathlib.Path, data: bytes) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return True
-
-
-# ---------------------------------------------------------------------------
-# Power BI REST API – Dashboards
-# ---------------------------------------------------------------------------
-
-def get_dashboard_definition(
-    session_pbi: requests.Session,
-    dashboard_id: str,
-) -> dict | None:
-    """Fetch dashboard metadata and tiles from the Power BI REST API.
-
-    Tile references (reportId, datasetId) are resolved to human-readable
-    names so that dashboard.json is self-contained and workspace-independent.
-    This enables Git-based deployment to any workspace without depending on
-    the original workspace still being in the same state.
-
-    Returns a synthetic 'definition' dict with a 'parts' list so the
-    existing save_definition() logic can write the file to disk.
-    """
-    # Dashboard metadata
-    url = f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/dashboards/{dashboard_id}"
-    resp = session_pbi.get(url, timeout=60)
-    if resp.status_code in (400, 404):
-        return None
-    resp.raise_for_status()
-    dashboard_meta = resp.json()
-
-    # Dashboard tiles
-    tiles_url = f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/dashboards/{dashboard_id}/tiles"
-    tiles_resp = session_pbi.get(tiles_url, timeout=60)
-    tiles = []
-    if tiles_resp.status_code == 200:
-        tiles = tiles_resp.json().get("value", [])
-    elif tiles_resp.status_code not in (400, 404):
-        tiles_resp.raise_for_status()
-
-    # Resolve report and dataset IDs to names so the definition is portable
-    report_names: dict[str, str] = {}
-    dataset_names: dict[str, str] = {}
-    for tile in tiles:
-        for rid_key, cache in (("reportId", report_names), ("datasetId", dataset_names)):
-            rid = tile.get(rid_key, "")
-            if rid and rid not in cache:
-                cache[rid] = ""  # placeholder
-
-    # Batch-resolve reports
-    if report_names:
-        r = session_pbi.get(f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/reports", timeout=60)
-        if r.ok:
-            for rpt in r.json().get("value", []):
-                if rpt.get("id") in report_names:
-                    report_names[rpt["id"]] = rpt.get("name", "")
-
-    # Batch-resolve datasets
-    if dataset_names:
-        r = session_pbi.get(f"{POWERBI_BASE}/groups/{WORKSPACE_ID}/datasets", timeout=60)
-        if r.ok:
-            for ds in r.json().get("value", []):
-                if ds.get("id") in dataset_names:
-                    dataset_names[ds["id"]] = ds.get("name", "")
-
-    # Enrich tiles with resolved names
-    for tile in tiles:
-        rid = tile.get("reportId", "")
-        if rid and rid in report_names:
-            tile["reportName"] = report_names[rid]
-        did = tile.get("datasetId", "")
-        if did and did in dataset_names:
-            tile["datasetName"] = dataset_names[did]
-
-    dashboard_json = {
-        "id":          dashboard_meta.get("id", dashboard_id),
-        "displayName": dashboard_meta.get("displayName", ""),
-        "isReadOnly":  dashboard_meta.get("isReadOnly", False),
-        "tiles":       tiles,
-    }
-
-    payload = base64.b64encode(
-        json.dumps(dashboard_json, indent=2, ensure_ascii=False).encode("utf-8")
-    ).decode("ascii")
-
-    return {
-        "parts": [
-            {
-                "path":        "dashboard.json",
-                "payloadType": "InlineBase64",
-                "payload":     payload,
-            }
-        ]
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -526,14 +428,6 @@ def main():
     })
     print("  Fabric token  OK")
 
-    pbi_token   = get_access_token(POWERBI_SCOPE)
-    session_pbi = requests.Session()
-    session_pbi.headers.update({
-        "Authorization": f"Bearer {pbi_token}",
-        "Content-Type":  "application/json",
-    })
-    print("  Power BI token  OK")
-
     # ── 2. Discover items ────────────────────────────────────────────────────────────
     print("\n[2/4] Discovering workspace items …")
     items = list_workspace_items(session)
@@ -567,10 +461,7 @@ def main():
             continue
 
         try:
-            if item_type in POWERBI_API_TYPES:
-                definition = get_dashboard_definition(session_pbi, item_id)
-            else:
-                definition = get_item_definition(session, item_id, item_type)
+            definition = get_item_definition(session, item_id, item_type)
             if definition is None:
                 print("    SKIP – getDefinition not supported or returned nothing")
                 skipped.append({**item, "skipReason": "getDefinition returned nothing"})

@@ -33,6 +33,7 @@ Automated backup, deployment, and promotion of Microsoft PowerBI workspace artif
   - [GitHub Actions](#github-actions)
   - [Additional Resources](#additional-resources)
 - [Troubleshooting](#troubleshooting)
+- [Dashboard Limitations](#dashboard-limitations)
 
 ---
 
@@ -593,3 +594,37 @@ Standard-library modules used: `os`, `sys`, `json`, `time`, `base64`, `pathlib`,
 | WorkspaceSync commit push fails | `GITHUB_TOKEN` lacks write permission | Go to **Settings → Actions → General → Workflow permissions** and enable **Read and write** |
 | Selective deploy can't find item | Folder name doesn't match | Use the exact folder name including the type suffix (e.g. `Add Calculated Measure.Notebook`) |
 | LRO polling timeout | Operation took longer than 6 minutes | Increase `POLL_MAX` in the Python script |
+
+---
+
+## Dashboard Limitations
+
+Dashboards are intentionally **excluded from both sync and deploy** pipelines. The Power BI and Fabric APIs do not provide the endpoints needed to fully automate dashboard backup or deployment. This section explains the specific gaps and provides links to the relevant Microsoft documentation.
+
+### Why Dashboards Cannot Be Synced or Deployed
+
+Power BI Dashboards are a **service-only artifact** — they can only be created and edited interactively in the Power BI portal. Unlike Reports and Semantic Models, Dashboards have no file format (no `.pbip`, `.pbir`, or TMDL representation) and are not authored in Power BI Desktop.
+
+| Gap | Detail |
+|-----|--------|
+| **No Fabric definition API support** | The Fabric Item Management API lists Dashboard as a known type, but every operation except `List` is unsupported — Create, Delete, Get Definition, and Update Definition all return errors. |
+| **No create/update tile REST endpoint** | The Power BI REST API can list and clone tiles, but there is no endpoint to create a new tile from scratch or update an existing tile's configuration. Tiles can only be created by pinning a visual from a report in the portal. |
+| **Clone Tile requires a live source** | The `CloneTile` endpoint copies a tile from one dashboard to another, but it requires the source dashboard (and its underlying report/dataset) to exist in the same or another workspace at clone time — making it unsuitable for a Git-to-workspace deployment. |
+| **Not supported by Fabric Git integration** | Dashboard is not in the list of item types supported by Fabric's built-in Git integration, so it cannot be version-controlled through that mechanism either. |
+| **No Power BI Desktop support** | Dashboards are described as "a feature of the Power BI service" and cannot be opened, edited, or saved in Power BI Desktop. |
+
+### Recommended Workaround
+
+If you need a dashboard-like experience that **is** fully deployable via Git:
+
+- Use a **Report page** configured as a "dashboard" (multi-visual summary page). Reports are fully supported by `sync_powerbi.py`, `deploy_to_workspace.py`, and Fabric Git integration.
+- Pin the report page to a dashboard manually in each target workspace as a one-time setup step.
+
+### Microsoft Learn References
+
+- [Power BI REST API — Dashboards](https://learn.microsoft.com/en-us/rest/api/power-bi/dashboards) — available operations (Get, List, Delete dashboard; Get Tiles, Clone Tile)
+- [Clone Tile In Group](https://learn.microsoft.com/en-us/rest/api/power-bi/dashboards/clone-tile-in-group) — requires a live source workspace and dashboard
+- [Fabric Item Management Overview](https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/item-management-overview) — Dashboard row shows all ❌ except List
+- [Fabric Item Definition Overview](https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/definitions/item-definition-overview) — Dashboard not listed as a supported definition type
+- [Fabric Git Integration — Supported Items](https://learn.microsoft.com/en-us/fabric/cicd/git-integration/intro-to-git-integration) — Dashboard not included under Power BI items
+- [Introduction to Dashboards](https://learn.microsoft.com/en-us/power-bi/create-reports/service-dashboards) — "Dashboards are a feature of the Power BI service. They're not available in Power BI Desktop."

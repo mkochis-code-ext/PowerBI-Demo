@@ -34,22 +34,6 @@ Dependencies are resolved transitively (deps of deps are included).
 The .platform file (PowerBI Git-integration metadata) is intentionally
 excluded from the parts list sent to the API.
 
-Dashboard deployment
---------------------
-Dashboards cannot be managed through the Fabric definition API, and the
-Power BI REST API does not expose a "create tile" endpoint — tiles can
-only be created interactively (pin from a report) or via CloneTile.
-
-The deploy strategy for dashboards is:
-  1. Create the dashboard in the target workspace if it does not exist.
-  2. Compare the desired tile state from Git (dashboard.json) with the
-     live tiles in the target workspace.
-  3. Report tile drift: missing tiles, extra tiles, and changed tiles.
-  4. For missing tiles, log the exact report/dataset name so the user
-     knows what to pin.  After this one-time manual step the dashboard is
-     fully maintained — subsequent deploys of reports/datasets from Git
-     keep the pinned tiles up-to-date automatically.
-
 Expected environment variables
 -------------------------------
 TENANT_ID            – Azure AD tenant ID
@@ -79,9 +63,7 @@ CLIENT_SECRET       = os.environ["CLIENT_SECRET"]
 TARGET_WORKSPACE_ID = os.environ["TARGET_WORKSPACE_ID"]
 
 FABRIC_BASE   = "https://api.fabric.microsoft.com/v1"
-POWERBI_BASE  = "https://api.powerbi.com/v1.0/myorg"
 FABRIC_SCOPE  = "https://api.fabric.microsoft.com/.default"
-POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 AUTH_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
 SOURCE_ROOT  = pathlib.Path("workspace")
@@ -93,13 +75,10 @@ DEPLOY_ITEM  = os.environ.get("DEPLOY_ITEM", "").strip()
 NO_DEPLOY_TYPES = {
     "SQLAnalyticsEndpoint",  # auto-generated from Lakehouse; cannot be deployed
     "SQLEndpoint",           # variant name for the same auto-generated endpoint
+    "Dashboard",             # no Fabric definition API support; see README
     "MountedWarehouse",
     "MountedDataFactory",
 }
-
-# Item types deployed via the Power BI REST API instead of the Fabric
-# definition API.
-POWERBI_API_TYPES = {"Dashboard"}
 
 # Map of lower-cased item type to the definition format string the API
 # requires when uploading parts.  Types not listed here omit the format
@@ -497,233 +476,6 @@ def delete_item(session: requests.Session, item_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard deployment (Git-based with tile drift detection)
-# ---------------------------------------------------------------------------
-
-def _read_dashboard_json(item_dir: pathlib.Path) -> dict | None:
-    """Read and parse the local dashboard.json file."""
-    path = item_dir / "dashboard.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _create_pbi_dashboard(
-    session_pbi: requests.Session,
-    display_name: str,
-) -> str:
-    """Create a new empty dashboard via Power BI API and return its ID."""
-    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards"
-    resp = session_pbi.post(url, json={"name": display_name}, timeout=60)
-    resp.raise_for_status()
-    return resp.json().get("id", "")
-
-
-def _delete_pbi_dashboard(
-    session_pbi: requests.Session,
-    dashboard_id: str,
-) -> None:
-    """Delete a dashboard via the Power BI API."""
-    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards/{dashboard_id}"
-    resp = session_pbi.delete(url, timeout=60)
-    if resp.status_code == 404:
-        return
-    resp.raise_for_status()
-
-
-def _get_live_dashboard_id(
-    session_pbi: requests.Session,
-    display_name: str,
-) -> str | None:
-    """Find a dashboard by display name in the target workspace and return its ID."""
-    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards"
-    resp = session_pbi.get(url, timeout=60)
-    if not resp.ok:
-        return None
-    for dash in resp.json().get("value", []):
-        if dash.get("displayName", "").lower() == display_name.lower():
-            return dash.get("id", "")
-    return None
-
-
-def _get_live_tiles(
-    session_pbi: requests.Session,
-    dashboard_id: str,
-) -> list[dict]:
-    """Fetch current tiles for a live dashboard."""
-    url = f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/dashboards/{dashboard_id}/tiles"
-    resp = session_pbi.get(url, timeout=60)
-    if resp.status_code in (400, 404):
-        return []
-    resp.raise_for_status()
-    return resp.json().get("value", [])
-
-
-def _tile_signature(tile: dict) -> str:
-    """Build a comparison key for a tile based on its report/dataset binding."""
-    return (
-        f"report={tile.get('reportName', tile.get('reportId', ''))}|"
-        f"dataset={tile.get('datasetName', tile.get('datasetId', ''))}|"
-        f"title={tile.get('title', '')}"
-    ).lower()
-
-
-def _match_live_tile_to_desired(
-    live_tile: dict,
-    live_report_id_to_name: dict[str, str],
-    live_dataset_id_to_name: dict[str, str],
-) -> str:
-    """Build the same signature for a live tile after resolving IDs to names."""
-    report_name = live_report_id_to_name.get(live_tile.get("reportId", ""), "")
-    dataset_name = live_dataset_id_to_name.get(live_tile.get("datasetId", ""), "")
-    return (
-        f"report={report_name}|"
-        f"dataset={dataset_name}|"
-        f"title={live_tile.get('title', '')}"
-    ).lower()
-
-
-def _detect_tile_drift(
-    session_pbi: requests.Session,
-    dashboard_id: str,
-    desired_tiles: list[dict],
-) -> dict:
-    """Compare desired tiles from Git with live tiles in the target workspace.
-
-    Returns a dict with 'matching', 'missing', 'extra' tile lists.
-    """
-    live_tiles = _get_live_tiles(session_pbi, dashboard_id)
-
-    # Build id→name maps for the live workspace
-    live_report_ids: dict[str, str] = {}
-    live_dataset_ids: dict[str, str] = {}
-
-    r = session_pbi.get(f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/reports", timeout=60)
-    if r.ok:
-        for rpt in r.json().get("value", []):
-            live_report_ids[rpt["id"]] = rpt.get("name", "").lower()
-
-    r = session_pbi.get(f"{POWERBI_BASE}/groups/{TARGET_WORKSPACE_ID}/datasets", timeout=60)
-    if r.ok:
-        for ds in r.json().get("value", []):
-            live_dataset_ids[ds["id"]] = ds.get("name", "").lower()
-
-    # Build signature sets
-    desired_sigs = {_tile_signature(t): t for t in desired_tiles}
-    live_sigs = {
-        _match_live_tile_to_desired(t, live_report_ids, live_dataset_ids): t
-        for t in live_tiles
-    }
-
-    matching = []
-    missing = []
-    extra = []
-
-    for sig, tile in desired_sigs.items():
-        if sig in live_sigs:
-            matching.append(tile)
-        else:
-            missing.append(tile)
-
-    for sig, tile in live_sigs.items():
-        if sig not in desired_sigs:
-            extra.append(tile)
-
-    return {"matching": matching, "missing": missing, "extra": extra}
-
-
-def deploy_dashboard(
-    session_pbi: requests.Session,
-    display_name: str,
-    item_dir: pathlib.Path,
-    existing_id: str | None,
-) -> tuple[str, str]:
-    """Deploy a dashboard from Git with tile drift detection.
-
-    Strategy:
-      1. Create the dashboard if it does not exist.
-      2. Compare desired tile state (from dashboard.json in Git) with
-         live tiles in the target workspace.
-      3. Report tile drift with actionable details.
-
-    Returns (action, dashboard_id) where action is one of:
-        'created'  - new dashboard was created
-        'deployed' - dashboard exists and tiles are in sync
-        'drifted'  - dashboard exists but tiles differ from Git
-        'skipped'  - dashboard exists with no tile data to compare
-    """
-    dashboard_data = _read_dashboard_json(item_dir)
-    desired_tiles = dashboard_data.get("tiles", []) if dashboard_data else []
-
-    # ── Resolve the live Power BI dashboard ID ───────────────────────────
-    # The Fabric item ID (existing_id) is not always the same as the
-    # Power BI dashboard ID, so look it up by name.
-    live_dash_id = _get_live_dashboard_id(session_pbi, display_name)
-
-    if not live_dash_id and not existing_id:
-        # Brand new dashboard
-        print("    Creating new dashboard via Power BI API …")
-        live_dash_id = _create_pbi_dashboard(session_pbi, display_name)
-        print(f"    ✓ Created dashboard {live_dash_id}")
-
-        if desired_tiles:
-            print(f"    ⚠ {len(desired_tiles)} tile(s) need to be pinned manually:")
-            for i, tile in enumerate(desired_tiles, 1):
-                t_title  = tile.get("title", "(untitled)")
-                t_report = tile.get("reportName", tile.get("reportId", "n/a"))
-                t_dataset = tile.get("datasetName", tile.get("datasetId", "n/a"))
-                print(f"      {i}. \"{t_title}\"  ←  report: {t_report}  |  dataset: {t_dataset}")
-            print("      Pin these visuals from their reports in the Power BI portal.")
-            print("      Once pinned, subsequent deploys will track tile drift automatically.")
-        return ("created", live_dash_id)
-
-    # ── Dashboard exists – compare tile state ────────────────────────────
-    dash_id = live_dash_id or existing_id or ""
-    if not desired_tiles:
-        print(f"    OK – dashboard exists ({dash_id}), no tile data in Git to compare")
-        return ("skipped", dash_id)
-
-    if not live_dash_id:
-        # Fabric knows the item but PBI API can't find the dashboard
-        print(f"    OK – Fabric item exists ({existing_id}) but not visible via Power BI API")
-        return ("skipped", existing_id or "")
-
-    print(f"    Comparing tiles: Git ({len(desired_tiles)}) vs live …")
-    drift = _detect_tile_drift(session_pbi, live_dash_id, desired_tiles)
-    n_match   = len(drift["matching"])
-    n_missing = len(drift["missing"])
-    n_extra   = len(drift["extra"])
-
-    if n_missing == 0 and n_extra == 0:
-        print(f"    ✓ All {n_match} tile(s) match Git – no drift detected")
-        return ("deployed", dash_id)
-
-    # Report drift details
-    action = "drifted"
-    print(f"    ⚠ Tile drift detected: {n_match} matching, {n_missing} missing, {n_extra} extra")
-
-    if drift["missing"]:
-        print("    Missing tiles (in Git but not in workspace):")
-        for tile in drift["missing"]:
-            t_title  = tile.get("title", "(untitled)")
-            t_report = tile.get("reportName", tile.get("reportId", "n/a"))
-            t_dataset = tile.get("datasetName", tile.get("datasetId", "n/a"))
-            print(f"      • \"{t_title}\"  ←  report: {t_report}  |  dataset: {t_dataset}")
-        print("      Pin these from their reports in the Power BI portal.")
-
-    if drift["extra"]:
-        print("    Extra tiles (in workspace but not in Git):")
-        for tile in drift["extra"]:
-            print(f"      • \"{tile.get('title', '(untitled)')}\"  (id: {tile.get('id', 'n/a')})")
-        print("      Remove these in the Power BI portal if they are unwanted.")
-
-    return (action, dash_id)
-
-
-# ---------------------------------------------------------------------------
 # Directory scanner
 # ---------------------------------------------------------------------------
 
@@ -1030,14 +782,6 @@ def main():
     })
     print("  Fabric token  OK")
 
-    pbi_token   = get_access_token(POWERBI_SCOPE)
-    session_pbi = requests.Session()
-    session_pbi.headers.update({
-        "Authorization": f"Bearer {pbi_token}",
-        "Content-Type":  "application/json",
-    })
-    print("  Power BI token  OK")
-
     # ── 2. Inventory target workspace ────────────────────────────────────────
     step = "[2/3]" if selective else "[2/4]"
     print(f"\n{step} Inventorying target workspace …")
@@ -1068,10 +812,6 @@ def main():
     else:
         ordered_items = list(iter_item_dirs(SOURCE_ROOT))
 
-    # Ensure dashboards are deployed after other items so that the
-    # reports / datasets they depend on are already in the target workspace.
-    ordered_items.sort(key=lambda x: 1 if x[1] in POWERBI_API_TYPES else 0)
-
     for display_name, item_type, item_dir in ordered_items:
         print(f"\n  [{item_type}]  {display_name}")
 
@@ -1083,24 +823,6 @@ def main():
         lookup_key = (display_name.lower(), item_type.lower())
         repo_keys.add(lookup_key)
         existing_id = existing.get(lookup_key)
-
-        # ── Dashboard / Power BI API types ────────────────────────────────
-        if item_type in POWERBI_API_TYPES:
-            try:
-                action, dash_id = deploy_dashboard(
-                    session_pbi, display_name, item_dir, existing_id,
-                )
-                if action == "created":
-                    existing[lookup_key] = dash_id
-                    results["created"] += 1
-                elif action in ("deployed", "drifted"):
-                    results["deployed"] += 1
-                else:
-                    results["skipped"] += 1
-            except Exception as exc:
-                print(f"    ERROR – {exc}")
-                results["errors"] += 1
-            continue
 
         # ── Metadata-only types (Lakehouse, Environment, …) ──────────────
         # These cannot be updated via the definition API and cannot be safely
@@ -1176,10 +898,7 @@ def main():
             if ws_key not in repo_keys:
                 print(f"  [{ws_type}]  {ws_name}")
                 try:
-                    if ws_type in POWERBI_API_TYPES:
-                        _delete_pbi_dashboard(session_pbi, ws_id)
-                    else:
-                        delete_item(session, ws_id)
+                    delete_item(session, ws_id)
                     print(f"    ✓ Deleted  {ws_id}")
                     results["deleted"] += 1
                 except Exception as exc:
