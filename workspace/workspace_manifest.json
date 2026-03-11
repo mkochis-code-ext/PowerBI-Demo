@@ -1,8 +1,8 @@
 {
   "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
-  "syncedAt": "2026-03-11T13:20:34Z",
+  "syncedAt": "2026-03-11T14:08:29Z",
   "totalItems": 13,
-  "skippedCount": 2,
+  "skippedCount": 4,
   "byType": {
     "Dashboard": 2,
     "Environment": 1,
@@ -107,6 +107,22 @@
     }
   ],
   "skippedItems": [
+    {
+      "id": "fdc62420-c6ba-4252-8925-d44d64d1b69e",
+      "type": "Dashboard",
+      "displayName": "Test Dashboard",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
+      "skipReason": "no getDefinition support"
+    },
+    {
+      "id": "87796d65-38c6-48ea-9842-4e929d5a41fa",
+      "type": "Dashboard",
+      "displayName": "Demo Dashboard",
+      "description": "",
+      "workspaceId": "f4eda307-e648-425e-9c89-6ef1ec852eeb",
+      "skipReason": "no getDefinition support"
+    },
     {
       "id": "1623fbb9-f8c8-4eb9-8259-f377130adf62",
       "type": "SQLEndpoint",
