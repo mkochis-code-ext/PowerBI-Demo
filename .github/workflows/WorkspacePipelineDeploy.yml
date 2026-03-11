@@ -3,6 +3,25 @@ name: PowerBI Deployment Pipeline
 
 on:
     workflow_dispatch:
+      inputs:
+        deploy_scope:
+          description: 'Deployment scope (All = everything, Selective = specific items)'
+          required: true
+          default: 'All'
+          type: choice
+          options:
+            - All
+            - Selective
+        item_names:
+          description: 'Items to deploy (comma-separated names, supports wildcards e.g. "Demo Report,demo_semantic*"). Used only when Selective.'
+          required: false
+          type: string
+          default: ''
+        include_dependents:
+          description: 'Include related/dependent items (e.g. Semantic Model for a Report)'
+          required: false
+          type: boolean
+          default: true
 
 permissions:
   contents: read
@@ -100,15 +119,91 @@ jobs:
           Log "Pipeline: $pipelineId, Dev: $devId, Test: $testId"
 
           # ============================================================================
-          # STEP 2: Trigger Deployment from Development to Test
-          # Initiates async deployment operation via Fabric API
+          # STEP 2: Build deployment request (All or Selective)
           # ============================================================================
           $deployUri = "$fabricResource/v1/deploymentPipelines/$pipelineId/deploy"
-          $body = @{
-            sourceStageId = $devId    # Development stage
-            targetStageId = $testId   # Test stage
-            note = "GH Dev→Test"       # Deployment note for auditing
-          } | ConvertTo-Json -Depth 5
+          $deployScope = '${{ inputs.deploy_scope }}'
+
+          if ($deployScope -eq 'Selective') {
+            $itemNamesInput = '${{ inputs.item_names }}'
+            $includeDependents = '${{ inputs.include_dependents }}' -eq 'true'
+
+            if ([string]::IsNullOrWhiteSpace($itemNamesInput)) {
+              Fail "Selective deployment requires at least one item name in 'item_names' input."
+            }
+
+            # List items in the source (Development) stage
+            Log "Listing items in Development stage..."
+            $itemsResp = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines/$pipelineId/stages/$devId/items"
+            if ($itemsResp.ExitCode -ne 0){ $itemsResp.ErrText | Out-Host; Fail "Failed to list stage items" }
+            $stageItems = ($itemsResp.OutJson | ConvertFrom-Json).value
+
+            Log "Available items in stage ($($stageItems.Count)):"
+            $stageItems | ForEach-Object { Log "  - $($_.itemDisplayName) ($($_.itemType))" }
+
+            # Parse requested names (comma-separated, supports wildcards)
+            $requestedNames = $itemNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+            # Match items by display name (wildcard support via -like)
+            $matchedItems = @($stageItems | Where-Object {
+              $item = $_
+              $requestedNames | Where-Object { $item.itemDisplayName -like $_ }
+            })
+
+            if ($matchedItems.Count -eq 0) {
+              Fail "No items matched the provided names: $itemNamesInput"
+            }
+
+            # Optionally include dependent/related items
+            if ($includeDependents) {
+              $matchedIds = [System.Collections.Generic.HashSet[string]]::new()
+              $matchedItems | ForEach-Object { $matchedIds.Add($_.itemId) | Out-Null }
+              $selectedTypes = $matchedItems | Select-Object -ExpandProperty itemType -Unique
+              $dependentItems = @()
+
+              # Reports depend on Semantic Models
+              if ($selectedTypes -contains 'Report') {
+                $dependentItems += @($stageItems | Where-Object { $_.itemType -eq 'SemanticModel' -and -not $matchedIds.Contains($_.itemId) })
+              }
+              # Dashboards depend on Reports and Semantic Models
+              if ($selectedTypes -contains 'Dashboard') {
+                $dependentItems += @($stageItems | Where-Object { $_.itemType -in @('Report','SemanticModel') -and -not $matchedIds.Contains($_.itemId) })
+              }
+              # Semantic Models may depend on data sources
+              if ($selectedTypes -contains 'SemanticModel') {
+                $dependentItems += @($stageItems | Where-Object { $_.itemType -in @('Lakehouse','SQLDatabase','Warehouse') -and -not $matchedIds.Contains($_.itemId) })
+              }
+
+              if ($dependentItems.Count -gt 0) {
+                # Deduplicate
+                $dependentItems = $dependentItems | Sort-Object -Property itemId -Unique
+                Log "Including $($dependentItems.Count) dependent item(s):"
+                $dependentItems | ForEach-Object { Log "  + $($_.itemDisplayName) ($($_.itemType))" }
+                $matchedItems = @($matchedItems) + @($dependentItems)
+              }
+            }
+
+            Log "Deploying $($matchedItems.Count) item(s):"
+            $matchedItems | ForEach-Object { Log "  -> $($_.itemDisplayName) ($($_.itemType))" }
+
+            $deployItems = @($matchedItems | ForEach-Object {
+              @{ sourceItemId = $_.itemId; itemType = $_.itemType }
+            })
+
+            $body = @{
+              sourceStageId = $devId
+              targetStageId = $testId
+              items         = $deployItems
+              note          = "GH Dev->Test (selective)"
+            } | ConvertTo-Json -Depth 5
+          }
+          else {
+            $body = @{
+              sourceStageId = $devId
+              targetStageId = $testId
+              note          = "GH Dev->Test"
+            } | ConvertTo-Json -Depth 5
+          }
 
           try {
             $resp = Invoke-WebRequest -Method Post -Uri $deployUri -Headers @{ Authorization = "Bearer $token"; 'Content-Type'='application/json'} -Body $body -ErrorAction Stop
@@ -255,13 +350,86 @@ jobs:
           if (-not $testId -or -not $prodId){ Fail "Could not resolve source/target stage IDs" }
           Log "Pipeline: $pipelineId, Test: $testId, Prod: $prodId"
 
-          # Deploy from Test to Production
+          # Build deployment request (All or Selective)
           $deployUri = "$fabricResource/v1/deploymentPipelines/$pipelineId/deploy"
-          $body = @{
-            sourceStageId = $testId
-            targetStageId = $prodId
-            note = "GH Test→Prod"
-          } | ConvertTo-Json -Depth 5
+          $deployScope = '${{ inputs.deploy_scope }}'
+
+          if ($deployScope -eq 'Selective') {
+            $itemNamesInput = '${{ inputs.item_names }}'
+            $includeDependents = '${{ inputs.include_dependents }}' -eq 'true'
+
+            if ([string]::IsNullOrWhiteSpace($itemNamesInput)) {
+              Fail "Selective deployment requires at least one item name in 'item_names' input."
+            }
+
+            # List items in the source (Test) stage
+            Log "Listing items in Test stage..."
+            $itemsResp = Invoke-AzRestJson -Method GET -Uri "$fabricResource/v1/deploymentPipelines/$pipelineId/stages/$testId/items"
+            if ($itemsResp.ExitCode -ne 0){ $itemsResp.ErrText | Out-Host; Fail "Failed to list stage items" }
+            $stageItems = ($itemsResp.OutJson | ConvertFrom-Json).value
+
+            Log "Available items in stage ($($stageItems.Count)):"
+            $stageItems | ForEach-Object { Log "  - $($_.itemDisplayName) ($($_.itemType))" }
+
+            # Parse requested names (comma-separated, supports wildcards)
+            $requestedNames = $itemNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+            # Match items by display name (wildcard support via -like)
+            $matchedItems = @($stageItems | Where-Object {
+              $item = $_
+              $requestedNames | Where-Object { $item.itemDisplayName -like $_ }
+            })
+
+            if ($matchedItems.Count -eq 0) {
+              Fail "No items matched the provided names: $itemNamesInput"
+            }
+
+            # Optionally include dependent/related items
+            if ($includeDependents) {
+              $matchedIds = [System.Collections.Generic.HashSet[string]]::new()
+              $matchedItems | ForEach-Object { $matchedIds.Add($_.itemId) | Out-Null }
+              $selectedTypes = $matchedItems | Select-Object -ExpandProperty itemType -Unique
+              $dependentItems = @()
+
+              if ($selectedTypes -contains 'Report') {
+                $dependentItems += @($stageItems | Where-Object { $_.itemType -eq 'SemanticModel' -and -not $matchedIds.Contains($_.itemId) })
+              }
+              if ($selectedTypes -contains 'Dashboard') {
+                $dependentItems += @($stageItems | Where-Object { $_.itemType -in @('Report','SemanticModel') -and -not $matchedIds.Contains($_.itemId) })
+              }
+              if ($selectedTypes -contains 'SemanticModel') {
+                $dependentItems += @($stageItems | Where-Object { $_.itemType -in @('Lakehouse','SQLDatabase','Warehouse') -and -not $matchedIds.Contains($_.itemId) })
+              }
+
+              if ($dependentItems.Count -gt 0) {
+                $dependentItems = $dependentItems | Sort-Object -Property itemId -Unique
+                Log "Including $($dependentItems.Count) dependent item(s):"
+                $dependentItems | ForEach-Object { Log "  + $($_.itemDisplayName) ($($_.itemType))" }
+                $matchedItems = @($matchedItems) + @($dependentItems)
+              }
+            }
+
+            Log "Deploying $($matchedItems.Count) item(s):"
+            $matchedItems | ForEach-Object { Log "  -> $($_.itemDisplayName) ($($_.itemType))" }
+
+            $deployItems = @($matchedItems | ForEach-Object {
+              @{ sourceItemId = $_.itemId; itemType = $_.itemType }
+            })
+
+            $body = @{
+              sourceStageId = $testId
+              targetStageId = $prodId
+              items         = $deployItems
+              note          = "GH Test->Prod (selective)"
+            } | ConvertTo-Json -Depth 5
+          }
+          else {
+            $body = @{
+              sourceStageId = $testId
+              targetStageId = $prodId
+              note          = "GH Test->Prod"
+            } | ConvertTo-Json -Depth 5
+          }
 
           try {
             $resp = Invoke-WebRequest -Method Post -Uri $deployUri -Headers @{ Authorization = "Bearer $token"; 'Content-Type'='application/json'} -Body $body -ErrorAction Stop
